@@ -32,7 +32,13 @@ def join_title(lines):
 def image_hint(text):
     lines = [s.strip() for s in text.splitlines() if s.strip()]
     platform, title, author, category = '', '', '', '待分类'
-    if '起点' in text or '刀片' in text:
+    compact=next(((i,m) for i,s in enumerate(lines[:12]) if (m:=re.fullmatch(r'(?:连载中|连载|已完结|完结)[|丨｜1Il\s]+([^|丨｜]+?)[|丨｜\s]+[\d.]+万?字',s))),None)
+    if compact and any(s=='VIP' for s in lines[:compact[0]]):
+        end,match=compact
+        platform='sfacg';category=match[1].strip()
+        title=join_title(clean_header([s for s in lines[:end] if s!='VIP']))
+        author=lines[end+1] if end+1<len(lines) else ''
+    elif '起点' in text or '刀片' in text:
         platform='qidian' if '起点' in text else 'ciweimao'
         author_links=[(i,s.rstrip('>＞ ').strip()) for i,s in enumerate(lines[:12]) if s.endswith(('>','＞')) and not re.search(r'票|荣誉|指数|目录',s)]
         signed=next(((i,s[:-1].strip()) for i,s in enumerate(lines[:12]) if s.endswith('著')),None)
@@ -113,7 +119,7 @@ def extract(result, floors,context=''):
             source = {'floor_index': f, 'floor': floors[f], 'image_index': i}
             for hint in image_hints(text,context):
                 if not hint['title']:
-                    skipped.append({**source, 'reason': '未识别到书籍标题，可手动添加'})
+                    skipped.append({**source, 'reason': '未识别到文字，可能是插图；可查看原图或重新识别' if not text.strip() else '未提取到书籍标题，请校对文字或使用 LLM 提取'})
                     continue
                 identity = (hint['platform'], providers.normalize(hint['title']), providers.normalize(hint['author']))
                 if identity in seen:continue

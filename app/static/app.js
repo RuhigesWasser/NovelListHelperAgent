@@ -55,7 +55,9 @@ async function loadJobs(){
   for(const j of jobs){
     const row=node('div',undefined,'job'),head=node('div',undefined,'job-title'),open=node('button',j.source||'图片识别');
     open.title=j.source;open.onclick=()=>loadResult(j.id).catch(err=>notice(err.message,true));
-    head.append(open,node('span',labels[j.state]||j.state,`pill ${j.state}`));
+    const stage=j.state==='succeeded'?j.organize_state:'';
+    const statusText=stage?({review:'待核对',succeeded:'整理完成',running:'整理中',queued:'等待整理',waiting:'等待整理',failed:'整理失败',cancelled:'整理已取消',interrupted:'整理已中断'}[stage]||'OCR 已完成'):(j.state==='succeeded'?'OCR 已完成':labels[j.state]||j.state);
+    head.append(open,node('span',statusText,`pill ${stage||j.state}`));
     row.append(head,node('small',`${j.engine==='builtin'?('OCR · '+(languageNames[j.language]||languageNames.zh)):'LLM'} · ${new Date(j.created).toLocaleString()}`));
     if(j.organize_state)row.append(node('p',j.organize_stage||'等待识别后整理','help'));
     const actions=node('div',undefined,'job-actions');
