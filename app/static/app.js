@@ -5,11 +5,11 @@ let selected = null, resultData = [], imageUrls = [], polling = true;
 const languageNames = {zh:'中文 / 英文',japan:'日文',korean:'韩文'};
 const labels = {queued:'排队中',running:'处理中',succeeded:'已完成',failed:'失败',cancelled:'已取消',interrupted:'已中断'};
 function node(tag, text, cls) { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; }
-function notice(text, error=false) { $('#notice').hidden=false; $('#notice').textContent=text; $('#notice').className=error?'error':''; }
+function notice(text, error=false) { const target=$('#book-create-notice');if(target&&$('#book-create-dialog')?.open){target.hidden=false;target.textContent=text;target.className=error?'detail-error':'help';} $('#notice').hidden=false; $('#notice').textContent=text; $('#notice').className=error?'error':''; }
 async function api(path, options={}) { const r=await fetch(path,{...options,headers:{'X-Session-Token':token,'Content-Type':'application/json',...options.headers}}); if(!r.ok){let d;try{d=await r.json();}catch{}throw new Error(typeof d?.detail==='string'?d.detail:`请求失败 (${r.status})`);}return r; }
 const json = async (path, options) => (await api(path, options)).json();
 const post = (path, data={}) => json(path,{method:'POST',body:JSON.stringify(data)});
-function view(name) { document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!==name);document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active',n.dataset.view===name)); const titles={workspace:['采集与识别','抓取帖子或上传图片，识别后校对文字。'],library:['本地书库','填写书籍资料，按题材保存。'],settings:['引擎与设置','配置模型接口与本地存储。']};$('#page-title').textContent=titles[name][0];$('#page-subtitle').textContent=titles[name][1];if(name==='library')loadBooks().catch(e=>notice(e.message,true)); }
+function view(name) { document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!==name);document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active',n.dataset.view===name)); const titles={workspace:['采集与识别','抓取帖子或上传图片，识别后校对文字。'],library:['本地书库','查阅、筛选和管理已归档的小说。'],settings:['引擎与设置','配置模型接口与本地存储。']};$('#page-title').textContent=titles[name][0];$('#page-subtitle').textContent=titles[name][1];if(name==='library')loadBooks().catch(e=>notice(e.message,true)); }
 document.querySelectorAll('.nav').forEach(n=>n.addEventListener('click',()=>view(n.dataset.view)));
 document.querySelectorAll('[name=kind]').forEach(n=>n.addEventListener('change',()=>{const image=$('[name=kind]:checked').value==='image';$('#source-wrap').hidden=image;$('#upload-wrap').hidden=!image;$('#submit-task').textContent=image?'开始图片识别 →':'开始采集与识别 →';}));
 let uploadFiles=[];
@@ -85,25 +85,8 @@ async function loadResult(id){const d=await json(`/api/jobs/${id}/result`);selec
 $('#save-result').onclick=()=>json(`/api/jobs/${selected}/result`,{method:'PUT',body:JSON.stringify(resultData)}).then(()=>notice('校对结果已保存')).catch(e=>notice(e.message,true));
 function downloadBlob(blob, name){const url=URL.createObjectURL(blob),a=node('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 $('#download-result').onclick=()=>downloadBlob(new Blob([JSON.stringify(resultData,null,2)],{type:'application/json'}),'识别结果.json');
-$('#go-library').onclick=()=>{view('library');$('#book-form').reset();clearLookup();$('#book-form').elements.source.value='贴吧/图片整理';$('#book-form').elements.url.value=$('#result-source').textContent.startsWith('http')?$('#result-source').textContent:'';notice('请根据校对结果填写书名，或搜索补全资料后保存。');};
+$('#go-library').onclick=()=>{view('library');openBookCreate();$('#book-form').reset();clearLookup();$('#book-form').elements.source.value='贴吧/图片整理';$('#book-form').elements.url.value=$('#result-source').textContent.startsWith('http')?$('#result-source').textContent:'';notice('请根据校对结果填写书名，或搜索补全资料后保存。');};
 async function downloadBook(path,name){try{const r=await api(`/api/books/download?path=${encodeURIComponent(path)}`);downloadBlob(await r.blob(),name);}catch(err){notice(err.message,true);}}
-async function loadBooks(){
-  const list=$('#books');list.replaceChildren();const books=await json('/api/books');
-  if(!books.length)list.append(node('div','暂无书籍','small-empty'));
-  for(const b of books){
-    const row=node('div',undefined,'book-item'),info=node('div',b.title),actions=node('div',undefined,'actions');
-    info.append(node('small',b.category));
-    const exportBook=node('button','导出资料','quiet');exportBook.onclick=()=>downloadBook(b.path,b.title+'.md');actions.append(exportBook);
-    const chapterLabel=(b.choose_chapters||b.is_esj)?'选择章节':'获取前 3 章';const chapters=node('button',chapterLabel,'quiet');
-    chapters.onclick=async()=>{if((b.choose_chapters||b.is_esj)){await chooseChapters(b);return;}chapters.disabled=true;chapters.textContent='读取中…';try{
-      const result=await post('/api/books/chapters',{path:b.path});
-      notice(`已保存 ${result.count} 章。${result.warnings.join('；')}`);await loadBooks();
-    }catch(error){notice(error.message,true);chapters.disabled=false;chapters.textContent=chapterLabel;}};
-    actions.append(chapters);
-    if(b.text_path){const text=node('button','导出正文','quiet');text.onclick=()=>downloadBook(b.text_path,b.title+'.txt');actions.append(text);}
-    row.append(info,actions);list.append(row);
-  }
-}
 $('#download-index').onclick=()=>downloadBook('索引.md','索引.md');
 $('#stop').onclick=async()=>{if(!confirm('停止服务将取消未完成任务。已保存的配置和密钥会保留。继续？'))return;try{await post('/api/shutdown');polling=false;notice('服务已停止。可以关闭页面；下次双击 Start.cmd 重新启动。');}catch(e){notice(e.message,true);}};
 loadJobs().catch(e=>notice(e.message,true));setInterval(()=>{if(polling)loadJobs().catch(()=>{});},2500);

@@ -64,6 +64,12 @@ class Task(BaseModel):
     auto_mode: Literal['off','local','llm'] = 'local'
 
 
+class BookUpdate(BaseModel):
+    path: str
+    revision: str
+    book: Book
+
+
 class ESJLogin(BaseModel):
     email: str = Field(default='', max_length=300, repr=False)
     password: str = Field(default='', max_length=1000, repr=False)
@@ -682,11 +688,31 @@ def create_app(local, token, shutdown=lambda: None):
     @app.get('/api/books')
     def books():
         base = local/'library'
-        return [{'title': p.stem, 'category': p.parent.parent.name, 'path': p.relative_to(base).as_posix(),
+        return [{**library.read_book(base,p),
                  'is_esj': bool(re.search(r'^- 链接（如有）：https://(?:www\.)?esjzone\.(?:one|cc)/detail/',p.read_text(encoding='utf-8'),re.M)),
                  'choose_chapters': bool(re.search(r'^- 链接（如有）：https://(?:(?:www\.)?esjzone\.(?:one|cc)/detail/|(?:www\.|wap\.)?ciweimao\.com/book/)',p.read_text(encoding='utf-8'),re.M)),
                  'text_path': p.with_suffix('.txt').relative_to(base).as_posix() if p.with_suffix('.txt').exists() else None}
                 for p in sorted(base.glob('*/*/*.md')) if p.name == p.parent.name + '.md']
+
+    @app.get('/api/books/detail')
+    def stored_book(path: str):
+        target=contained(local/'library',local/'library'/path)
+        if not target.is_file():raise HTTPException(404,'书籍不存在')
+        return library.read_book(local/'library',target)
+
+    @app.put('/api/books/detail')
+    def update_stored_book(value: BookUpdate):
+        with book_lock:
+            current=stored_book(value.path)
+            if current['revision']!=value.revision:raise HTTPException(409,'书籍已被其他操作更新，请关闭详情后重新打开')
+            if (value.book.title,value.book.category)!=(current['title'],current['category']):raise HTTPException(400,'此处只编辑资料，不能更改书名或分类路径')
+            provenance=dict(current['provenance'])
+            edited=set(provenance.get('user_edited_fields',[]))
+            edited.update(key for key in ('author','platform','words','status','tags','intro','review','source','url') if getattr(value.book,key)!=current.get(key,''))
+            provenance['user_edited_fields']=sorted(edited)
+            book=value.book.model_copy(update={'overwrite':True,'provenance':provenance})
+            library.save_book(local/'library',book)
+            return stored_book(value.path)
 
     @app.post('/api/books')
     def save_book(book: Book):

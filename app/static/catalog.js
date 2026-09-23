@@ -92,7 +92,7 @@ $('#book-form').onsubmit=async event=>{
     }
     data.provenance={retrieved:bookLookup,user_edited_fields:edited};
   }
-  try{await post('/api/books',data);notice('书籍与查询来源已保存，索引已更新。');await loadBooks();}
+  try{await post('/api/books',data);$('#book-create-dialog').close();notice('书籍与查询来源已保存，索引已更新。');await loadBooks();}
   catch(error){notice(error.message,true);}
 };
 
