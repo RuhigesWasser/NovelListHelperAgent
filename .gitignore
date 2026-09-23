@@ -1,0 +1,29 @@
+tmp/*
+索引.md
+# 屏蔽所有纯中文目录
+**/[一-龥]*/
+
+# Local Python environments, caches and credentials
+.venv*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+!.env.example
+.runtime/
+.local/
+dist/
+desktop/**/bin/
+desktop/**/obj/
+projects/agent/
+projects/browser/
+projects/windows/
+/AGENTS.md
+/agent/
+/projects/README.md
+/desktop/windows/README.md
+/docs/*
+!/docs/USAGE.md
+/reports/
+/notes/

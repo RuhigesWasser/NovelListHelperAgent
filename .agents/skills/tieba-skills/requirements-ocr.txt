@@ -1,0 +1,3 @@
+# CPU OCR，安装包包含默认中文/英文识别模型。
+rapidocr-onnxruntime==1.4.4
+Pillow>=10,<13

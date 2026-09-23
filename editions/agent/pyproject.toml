@@ -1,0 +1,21 @@
+[project]
+name = "shiye-agent"
+version = "0.3.0"
+description = "Portable local novel-list workspace"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "pydantic>=2,<3",
+  "aiotieba>=4,<5",
+  "rapidocr-onnxruntime==1.4.4",
+  "Pillow>=10,<13",
+  "beautifulsoup4>=4.12,<5",
+  "onnxruntime==1.23.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+  "onnxruntime==1.30.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+]
+
+[dependency-groups]
+dev = ["httpx>=0.28,<1"]
+
+[tool.uv]
+package = false
