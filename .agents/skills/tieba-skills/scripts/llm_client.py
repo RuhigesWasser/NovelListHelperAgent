@@ -107,7 +107,8 @@ class LlmOCR:
             raise ValueError('附加参数不能覆盖模型、消息、图片或流式开关')
         if token_field not in ('max_tokens','max_completion_tokens'):
             raise ValueError('不支持的输出长度字段')
-        self.opener = urllib.request.build_opener(NoRedirect())
+        from direct_http import DirectFirst
+        self.opener = DirectFirst(NoRedirect())
 
     @classmethod
     def from_config(cls, config):

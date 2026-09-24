@@ -19,7 +19,7 @@ TOOLS={
     'search_books':{'description':'搜索官方平台候选，不将近似结果当成已确认。','input':{'title':'书名','author':'可选作者','platform':'qidian / ciweimao / sfacg / fanqie / esj / all'}},
     'book_detail':{'description':'读取平台详情、简介、标签和字段来源。','input':{'url':'支持的书籍详情 URL'}},
     'chapter_catalog':{'description':'获取目录与前三章建议；ESJ 无法确认时交由 Agent/用户选择。','input':{'url':'书籍 URL'}},
-    'read_chapters':{'description':'读取最多三项章节，返回正文与来源。','input':{'url':'书籍 URL','selected_urls':'可选目录链接数组，最多三项'}},
+    'read_chapters':{'description':'读取选定章节，未指定时读取前三项；返回正文与来源。','input':{'url':'书籍 URL','selected_urls':'可选目录链接数组'}},
     'archive_book':{'description':'按项目格式写入书库并更新索引。默认不覆盖。','input':library.Book.model_json_schema()},
     'list_books':{'description':'列出本地书籍档案。','input':{}},
     'refresh_cover':{'description':'刷新已归档书籍的本地封面，失败时保留旧图。','input':{'path':'书库相对路径','replace_manual':'是否替换手动封面，默认 false'}},

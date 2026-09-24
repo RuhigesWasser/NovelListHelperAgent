@@ -121,7 +121,7 @@ class DetailRequest(BaseModel):
 
 class ChapterRequest(BaseModel):
     path: str = Field(min_length=1, max_length=1000)
-    selected_urls: list[str] | None = Field(default=None,max_length=3)
+    selected_urls: list[str] | None = Field(default=None,max_length=1000)
 
 
 class ReOCR(BaseModel):
@@ -785,7 +785,7 @@ def create_app(local, token, shutdown=lambda: None):
 
     @app.post('/api/books/catalog')
     def book_catalog(value: ChapterRequest):
-        _,url=chapter_source(value)
+        target,url=chapter_source(value)
         platform,entries=chapters.catalog(url)
         if platform=='esj':
             suggested,reason=chapters.esj_catalog.recommend(entries)
@@ -793,18 +793,22 @@ def create_app(local, token, shutdown=lambda: None):
             from app.mainland import suggested as suggest_chapters
             suggested,reason=suggest_chapters(platform,entries)
         return {'platform':platform,'entries':entries,'suggested_urls':[e['url'] for e in suggested],
-                'selection_reason':reason}
+                'selection_reason':reason,'saved_urls':[e.get('url','') for e in chapters.saved(target)['chapters']]}
+
+    @app.get('/api/books/reader')
+    def book_reader(path: str):
+        target=contained(local/'library',local/'library'/path)
+        if not target.is_file() or target.suffix!='.md':raise HTTPException(404,'书籍不存在')
+        with book_lock:return chapters.saved(target)
 
     @app.post('/api/books/chapters')
     def book_chapters(value: ChapterRequest):
         target,url=chapter_source(value)
         result = chapters.preview(url,selected_urls=value.selected_urls)
-        content = '\n\n'.join(f'{c["title"]}\n来源：{c["url"]}\n\n{c["content"]}' for c in result['chapters'])
         with book_lock:
-            target.with_suffix('.txt').write_text(content, encoding='utf-8')
-            target.with_suffix('.chapters.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+            combined=chapters.save(target,result)
         return {'path': target.with_suffix('.txt').relative_to(local/'library').as_posix(),
-                'count': len(result['chapters']), 'warnings': result['warnings']}
+                'count': len(result['chapters']), 'total':len(combined['chapters']), 'warnings': result['warnings']}
 
     @app.post('/api/shutdown')
     def stop():

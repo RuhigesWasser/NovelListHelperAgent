@@ -5,7 +5,12 @@ import json
 import re
 import sys
 from urllib.parse import urlencode
-from urllib.request import Request,urlopen
+from urllib.request import Request
+from pathlib import Path
+_network_dir = Path(__file__).resolve().parents[2]/"tieba-skills/scripts"
+if not _network_dir.is_dir(): _network_dir = Path(__file__).resolve().parents[1]/"tieba"
+sys.path.insert(0, str(_network_dir))
+from direct_http import urlopen
 from urllib.error import HTTPError,URLError
 
 API_BASE='https://api.sfacg.com'

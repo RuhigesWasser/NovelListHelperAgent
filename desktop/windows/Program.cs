@@ -38,7 +38,9 @@ internal sealed class DesktopWindow : Form
     {
         this.root = root; this.smoke = smoke;
         Text = "拾页 · 小说书单"; Width = 1280; Height = 850;
-        MinimumSize = new Size(850, 600); StartPosition = FormStartPosition.CenterScreen;
+        MinimumSize = new Size(760, 540);
+        Font = new Font("Microsoft YaHei UI", 9F);
+        BackColor = Color.FromArgb(246, 247, 249); StartPosition = FormStartPosition.CenterScreen;
         Controls.Add(web); Controls.Add(status);
         if (smoke) { WindowState = FormWindowState.Minimized; ShowInTaskbar = false; }
         Shown += async (_, _) => await StartAsync();
@@ -156,6 +158,7 @@ internal sealed class DesktopWindow : Form
             };
             web.CoreWebView2.NavigationCompleted += async (_, e) =>
             {
+                status.Visible = !e.IsSuccess;
                 status.Text = e.IsSuccess ? "本机运行 · 数据保存在程序目录" : "页面加载失败，可关闭后重新打开。";
                 if (smoke)
                 {

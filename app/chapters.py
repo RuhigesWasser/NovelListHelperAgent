@@ -1,6 +1,9 @@
 """Public chapter excerpts. Catalog order and source URLs are preserved."""
 from datetime import datetime, timezone
+import json
+import uuid
 import re
+from app.paths import replace_file
 from urllib.parse import urljoin, urlsplit
 from bs4 import BeautifulSoup
 from app import providers
@@ -93,9 +96,10 @@ def preview(url, limit=3, selected_urls=None):
     selection_note = ''
     if selected_urls is not None:
         by_url={e['url']:e for e in entries}
-        if not selected_urls or len(selected_urls)>limit or len(set(selected_urls))!=len(selected_urls) or any(u not in by_url for u in selected_urls):
-            raise providers.ProviderError('请选择本书目录中不超过 3 个不同章节')
-        chosen=[by_url[u] for u in selected_urls]
+        if not selected_urls or len(set(selected_urls))!=len(selected_urls) or any(u not in by_url for u in selected_urls):
+            raise providers.ProviderError('请选择本书目录中的不同章节')
+        selected=set(selected_urls)
+        chosen=[entry for entry in entries if entry['url'] in selected]
         selection_note='用户选择的目录条目'
     elif platform=='ciweimao':
         from app.mainland import suggested
@@ -106,12 +110,47 @@ def preview(url, limit=3, selected_urls=None):
         if not chosen:raise providers.ProviderError(selection_note)
     else:chosen=entries[:limit]
     chapters, warnings = [], []
+    positions={entry['url']:index for index,entry in enumerate(entries)}
     for entry in chosen:
         try:
-            chapters.append(read_chapter(platform, entry))
+            chapters.append({**read_chapter(platform, entry),'catalog_order':positions[entry['url']]})
         except providers.ProviderError as exc:
             warnings.append(f'{entry["title"]}（{entry["url"]}）：{exc}')
     if not chapters:
         raise providers.ProviderError('；'.join(warnings) or '未获取到免费正文')
-    return {'chapters': chapters, 'warnings': warnings, 'requested': limit,
-            'order': selection_note or '网站目录顺序', 'book_url': url}
+    return {'chapters': chapters, 'warnings': warnings, 'requested': len(chosen),
+            'order': selection_note or '网站目录顺序', 'book_url': url,
+            'catalog_urls':[entry['url'] for entry in entries]}
+
+
+def saved(target):
+    structured=target.with_suffix('.chapters.json')
+    if structured.is_file():
+        return json.loads(structured.read_text(encoding='utf8'))
+    text_file=target.with_suffix('.txt')
+    if not text_file.is_file():return {'chapters':[]}
+    text=text_file.read_text(encoding='utf8')
+    matches=list(re.finditer(r'^([^\n]+)\n来源：(https?://[^\s]+)\n',text,re.M))
+    entries=[]
+    for index,match in enumerate(matches):
+        end=matches[index+1].start() if index+1<len(matches) else len(text)
+        entries.append({'title':match[1],'url':match[2],'content':text[match.end():end].strip()})
+    if not entries:entries=[{'title':'已保存正文','url':'','content':text}]
+    return {'chapters':entries}
+
+
+def save(target,result):
+    previous=saved(target)
+    merged={entry.get('url') or entry['title']:entry for entry in previous['chapters']}
+    merged.update({entry.get('url') or entry['title']:entry for entry in result['chapters']})
+    positions={url:index for index,url in enumerate(result.get('catalog_urls',[]))}
+    for entry in merged.values():
+        if entry.get('url') in positions:entry['catalog_order']=positions[entry['url']]
+    entries=sorted(merged.values(),key=lambda entry:entry.get('catalog_order',10**9))
+    combined={**result,'chapters':entries}
+    content='\n\n'.join(f'{c["title"]}\n来源：{c.get("url", "")}\n\n{c["content"]}' for c in entries)
+    for suffix,body in (('.chapters.json',json.dumps(combined,ensure_ascii=False,indent=2)),('.txt',content)):
+        destination=target.with_suffix(suffix)
+        temporary=destination.with_name(destination.name+'.'+uuid.uuid4().hex+'.tmp')
+        temporary.write_text(body,encoding='utf8');replace_file(temporary,destination)
+    return combined

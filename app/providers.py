@@ -14,6 +14,7 @@ from app.paths import add_tools
 from app.esj_session import current_session, ESJSession, ESJError, HOSTS as ESJ_HOSTS
 
 add_tools()
+from direct_http import DirectFirst, urlopen
 PLATFORMS = {
     'qidian': {'name':'起点中文网','search':True,'detail':True,'note':'使用官方移动页查询资料和公开免费章节。'},
     'ciweimao': {'name':'刺猬猫','search':True,'detail':True,'note':'支持书名搜索与详情；部分阅读页需要网页验证或登录。'},
@@ -121,10 +122,10 @@ def fetch_html(url):
         if urllib.parse.urlsplit(url).hostname in ESJ_HOSTS:
             body = (session or ESJSession()).fetch(request)
         else:
-            opener=urllib.request.build_opener(SiteRedirect())
+            opener=DirectFirst(SiteRedirect())
             if urllib.parse.urlsplit(url).hostname in ('www.ciweimao.com','wap.ciweimao.com'):
                 if not hasattr(_site_clients,'ciweimao'):
-                    _site_clients.ciweimao=urllib.request.build_opener(SiteRedirect(),urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+                    _site_clients.ciweimao=DirectFirst(SiteRedirect(),urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
                     with _site_clients.ciweimao.open(urllib.request.Request('https://www.ciweimao.com/',headers={'User-Agent':'Mozilla/5.0'}),timeout=20) as landing:landing.read()
                 opener=_site_clients.ciweimao
                 request.add_header('Referer','https://www.ciweimao.com/')
@@ -305,7 +306,7 @@ def search_fanqie(title, page=0):
     url = FANQIE_SEARCH + '?' + urllib.parse.urlencode(params)
     request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=20) as response:
             payload = json.load(response)
         if payload.get('code') != 0:
             raise ProviderError(f'番茄搜索失败：{payload.get("message", "未知错误")}')

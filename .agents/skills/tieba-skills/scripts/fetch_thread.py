@@ -6,7 +6,8 @@ import importlib
 import json
 from pathlib import Path
 import sys
-from urllib.request import Request,urlopen
+from urllib.request import Request
+from direct_http import urlopen
 from common import ensure_utf8_stdout,extract_tid,project_root
 from ocr import add_ocr_arguments,make_engine,recognize_thread,write_json
 

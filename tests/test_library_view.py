@@ -1,10 +1,38 @@
 import unittest
+import json
+from unittest.mock import patch
 import test_app
 
 
 class LibraryViewTests(unittest.TestCase):
     setUp=test_app.AppTests.setUp
     post=test_app.AppTests.post
+
+    def test_reader_and_incremental_chapter_download_keep_catalog_order(self):
+        path=self.post('/api/books',{'title':'选章','category':'科幻','url':'https://book.sfacg.com/novel/10/'}).json()['path']
+        entries=[{'title':f'第{i}章','url':f'https://m.sfacg.com/c/{i}/'} for i in range(1,6)]
+        def read(platform,entry):return {**entry,'content':'正文 '+entry['title']}
+        with patch('app.chapters.catalog',return_value=('sfacg',entries)),patch('app.chapters.read_chapter',side_effect=read):
+            result=self.post('/api/books/chapters',{'path':path,'selected_urls':[e['url'] for e in reversed(entries[1:])]})
+            self.assertEqual(result.status_code,200,result.text);self.assertEqual(result.json()['count'],4)
+            result=self.post('/api/books/chapters',{'path':path,'selected_urls':[entries[0]['url'],entries[1]['url']]})
+            self.assertEqual(result.json()['total'],5)
+        reader=self.client.get('/api/books/reader',params={'path':path},headers=self.headers)
+        self.assertEqual([e['title'] for e in reader.json()['chapters']],[e['title'] for e in entries])
+        self.assertEqual(self.client.get('/api/books/reader',params={'path':path}).status_code,403)
+        self.assertEqual(self.client.get('/api/books/reader',params={'path':'../settings.json'},headers=self.headers).status_code,400)
+
+    def test_reader_handles_old_text_and_failed_download_preserves_it(self):
+        path=self.post('/api/books',{'title':'旧正文','category':'科幻','url':'https://book.sfacg.com/novel/10/'}).json()['path']
+        target=(self.local/'library'/path).with_suffix('.txt')
+        text='第一章\n来源：https://m.sfacg.com/c/1/\n\n一\n\n第二章\n来源：https://m.sfacg.com/c/2/\n\n二'
+        target.write_text(text,encoding='utf8')
+        result=self.client.get('/api/books/reader',params={'path':path},headers=self.headers).json()
+        self.assertEqual([c['content'] for c in result['chapters']],['一','二'])
+        from app.providers import ProviderError
+        with patch('app.chapters.preview',side_effect=ProviderError('无法读取')):
+            self.assertEqual(self.post('/api/books/chapters',{'path':path}).status_code,400)
+        self.assertEqual(target.read_text(encoding='utf8'),text)
 
     def test_existing_markdown_details_and_edit_preserve_chapters_and_sources(self):
         source={'retrieved':{'url':'https://example.test/book','title':'原书名'},'source_url':'https://tieba.baidu.com/p/123'}

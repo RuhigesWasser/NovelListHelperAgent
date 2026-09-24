@@ -114,10 +114,7 @@ function renderBookDetail(){
   if(book.text_path){const read=node('button','阅读已保存正文','primary');read.onclick=()=>readBookText(book);actions.append(read);const exportText=node('button','导出正文','quiet');exportText.onclick=()=>downloadBook(book.text_path,book.title+'.txt');actions.append(exportText);}
 }
 async function getBookChapters(book,button){
-  if(/https:\/\/(?:www\.|wap\.)?(?:esjzone\.(?:one|cc)|ciweimao\.com)\//.test(book.url)){bookDialog.close();await chooseChapters(book);return;}
-  button.disabled=true;button.textContent='正在获取…';$('#book-detail-error').hidden=true;
-  try{const result=await post('/api/books/chapters',{path:book.path});await loadBooks();if(bookDialog.open&&detailBook?.path===book.path){detailBook=await json('/api/books/detail?'+new URLSearchParams({path:book.path}));renderBookDetail();}notice(`已保存 ${result.count} 章。${result.warnings.join('；')}`);}
-  catch(error){if(bookDialog.open)detailError(error.message);else notice(error.message,true);button.disabled=false;button.textContent='重试获取章节';}
+  bookDialog.close();await chooseChapters(book);
 }
 function editBookDetail(){
   const book=detailBook,body=$('#book-detail-body');body.replaceChildren();$('#book-detail-actions').replaceChildren();
@@ -138,11 +135,34 @@ function editBookDetail(){
     catch(error){if(bookDialog.open)detailError(error.message);save.disabled=false;cancel.disabled=false;}
   };
 }
-let readerRequest=0;
-async function readBookText(book){
-  const request=++readerRequest,dialog=$('#book-reader-dialog');$('#book-reader-title').textContent=book.title;$('#book-reader-note').textContent='正在打开已保存正文…';$('#book-reader-text').textContent='';if(!dialog.open)dialog.showModal();
-  try{const response=await api('/api/books/download?'+new URLSearchParams({path:book.text_path}));const text=await response.text();if(request!==readerRequest)return;$('#book-reader-note').textContent='本地已保存内容';$('#book-reader-text').textContent=text;}
-  catch(error){if(request===readerRequest)$('#book-reader-note').textContent=error.message;}
+let readerRequest=0,readerChapters=[],readerIndex=0,readerPath='';
+function showReaderChapter(index){
+  readerIndex=Math.max(0,Math.min(index,readerChapters.length-1));
+  const entry=readerChapters[readerIndex];if(!entry)return;
+  $('#reader-chapter-title').textContent=entry.title;
+  $('#book-reader-note').textContent=`第 ${readerIndex+1} / ${readerChapters.length} 项 · 已保存在本地`;
+  $('#book-reader-text').textContent=entry.content;
+  $('#reader-prev').disabled=readerIndex===0;$('#reader-next').disabled=readerIndex===readerChapters.length-1;
+  $('#reader-toc').value=String(readerIndex);
+  const source=$('#reader-source');source.replaceChildren();const link=externalLink('查看原章节',entry.url);if(link)source.append(link);
+  $('#reader-scroll').scrollTop=0;
+  localStorage.setItem('reader:'+readerPath,String(readerIndex));
 }
+async function readBookText(book){
+  const request=++readerRequest,dialog=$('#book-reader-dialog');readerChapters=[];readerPath=book.path;
+  $('#book-reader-title').textContent=book.title;$('#book-reader-note').textContent='正在打开已保存正文…';
+  $('#book-reader-text').textContent='';$('#reader-chapter-title').textContent='';$('#reader-toc').replaceChildren();$('#reader-source').replaceChildren();
+  $('#reader-prev').disabled=true;$('#reader-next').disabled=true;
+  if(!dialog.open)dialog.showModal();
+  try{const result=await json('/api/books/reader?'+new URLSearchParams({path:book.path}));if(request!==readerRequest)return;
+    readerChapters=result.chapters;
+    readerChapters.forEach((chapter,index)=>{const option=node('option',chapter.title);option.value=String(index);$('#reader-toc').append(option);});
+    if(!readerChapters.length){$('#book-reader-note').textContent='还没有保存正文，请先选择章节下载。';return;}
+    showReaderChapter(Number(localStorage.getItem('reader:'+readerPath))||0);
+  }catch(error){if(request===readerRequest)$('#book-reader-note').textContent=error.message;}
+}
+$('#reader-prev').onclick=()=>showReaderChapter(readerIndex-1);
+$('#reader-next').onclick=()=>showReaderChapter(readerIndex+1);
+$('#reader-toc').onchange=event=>showReaderChapter(Number(event.target.value));
 $('#book-reader-dialog').addEventListener('close',()=>readerRequest++);
 $('#library-covers').onclick=async()=>{const button=$('#library-covers');button.disabled=true;try{const result=await post('/api/books/covers/missing');notice(result.queued?`正在补全 ${result.queued} 本书的封面。`:'没有需要补全的封面。');await loadBooks();}catch(error){notice(error.message,true);}finally{button.disabled=false;}};

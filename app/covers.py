@@ -17,6 +17,7 @@ import uuid
 from PIL import Image,ImageOps,UnidentifiedImageError
 from app import library,providers
 from app.paths import replace_file
+from direct_http import DirectFirst
 
 MAX_BYTES=8*1024*1024
 IMAGE_HOSTS=('bookcover.yuewen.com','rss.sfacg.com','rs.sfacg.com','byteimg.com','kuangxiangit.com','telegra.ph','esjzone.one','esjzone.cc')
@@ -81,7 +82,7 @@ def download(url):
     validate_remote(url)
     request=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0','Accept':'image/webp,image/png,image/jpeg,image/*;q=0.8'})
     try:
-        with urllib.request.build_opener(CoverRedirect()).open(request,timeout=15) as response:
+        with DirectFirst(CoverRedirect()).open(request,timeout=15) as response:
             data=response.read(MAX_BYTES+1)
     except urllib.error.HTTPError as error:raise CoverError('封面服务器返回 HTTP '+str(error.code)) from None
     except (OSError,TimeoutError):raise CoverError('封面下载失败，请稍后重试') from None
