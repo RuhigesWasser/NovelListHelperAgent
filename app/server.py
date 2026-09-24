@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from PIL import Image, ImageOps
 from app import library
+from app import covers
 from app.library import Book,component,LibraryError
 from app.jobs import Jobs, active_pipeline
 from app.paths import ROOT, add_tools
@@ -68,6 +69,16 @@ class BookUpdate(BaseModel):
     path: str
     revision: str
     book: Book
+
+
+class CoverRequest(BaseModel):
+    path: str = Field(max_length=2000)
+    replace_manual: bool = False
+
+
+class CoverUpload(BaseModel):
+    path: str = Field(max_length=2000)
+    image: str = Field(max_length=11_200_000)
 
 
 class ESJLogin(BaseModel):
@@ -136,11 +147,13 @@ def create_app(local, token, shutdown=lambda: None):
     esj_settings = ESJSettings(local)
     jobs = Jobs(local)
     book_lock = threading.RLock()
+    cover_queue=covers.CoverQueue(local/'library',esj_session.scope)
 
     @asynccontextmanager
     async def lifespan(app):
         yield
         jobs.close()
+        cover_queue.close()
         llm_settings.close()
         esj_session.clear()
         esj_settings.close()
@@ -688,7 +701,7 @@ def create_app(local, token, shutdown=lambda: None):
     @app.get('/api/books')
     def books():
         base = local/'library'
-        return [{**library.read_book(base,p),
+        return [{**library.read_book(base,p),'cover_pending':cover_queue.is_pending(p.relative_to(base).as_posix()),
                  'is_esj': bool(re.search(r'^- 链接（如有）：https://(?:www\.)?esjzone\.(?:one|cc)/detail/',p.read_text(encoding='utf-8'),re.M)),
                  'choose_chapters': bool(re.search(r'^- 链接（如有）：https://(?:(?:www\.)?esjzone\.(?:one|cc)/detail/|(?:www\.|wap\.)?ciweimao\.com/book/)',p.read_text(encoding='utf-8'),re.M)),
                  'text_path': p.with_suffix('.txt').relative_to(base).as_posix() if p.with_suffix('.txt').exists() else None}
@@ -698,7 +711,37 @@ def create_app(local, token, shutdown=lambda: None):
     def stored_book(path: str):
         target=contained(local/'library',local/'library'/path)
         if not target.is_file():raise HTTPException(404,'书籍不存在')
-        return library.read_book(local/'library',target)
+        return {**library.read_book(local/'library',target),'cover_pending':cover_queue.is_pending(path)}
+
+    @app.get('/api/books/cover')
+    def cover_image(path: str):
+        target=contained(local/'library',local/'library'/path)
+        stored_book(path)
+        image=covers.image_path(target)
+        if not image:raise HTTPException(404,'尚未缓存封面')
+        return FileResponse(image,media_type='image/png' if image.suffix=='.png' else 'image/jpeg',headers={'Cache-Control':'private, max-age=86400','X-Content-Type-Options':'nosniff'})
+
+    @app.post('/api/books/cover')
+    def refresh_cover(value: CoverRequest):
+        book=stored_book(value.path)
+        if book['cover'].get('origin')=='manual' and not value.replace_manual:raise HTTPException(409,'当前为手动封面，可选择恢复平台封面')
+        queued=cover_queue.enqueue(value.path,value.replace_manual)
+        return {'queued':queued,'cover':book['cover']}
+
+    @app.post('/api/books/covers/missing')
+    def missing_covers():
+        count=0
+        for book in books():
+            if not book['cover']['has_image'] and book['url'] and count<500:
+                count+=int(cover_queue.enqueue(book['path']))
+        return {'queued':count}
+
+    @app.put('/api/books/cover')
+    def upload_cover(value: CoverUpload):
+        target=contained(local/'library',local/'library'/value.path)
+        stored_book(value.path)
+        try:return covers.upload(local/'library',target,base64.b64decode(value.image,validate=True))
+        except (ValueError,covers.CoverError):raise HTTPException(400,'请选择不超过 8 MB 的 JPG、PNG、WebP 或 GIF 图片') from None
 
     @app.put('/api/books/detail')
     def update_stored_book(value: BookUpdate):
@@ -712,12 +755,16 @@ def create_app(local, token, shutdown=lambda: None):
             provenance['user_edited_fields']=sorted(edited)
             book=value.book.model_copy(update={'overwrite':True,'provenance':provenance})
             library.save_book(local/'library',book)
+            if current['url']!=book.url and book.url and current['cover'].get('origin')!='manual':cover_queue.enqueue(value.path)
             return stored_book(value.path)
 
     @app.post('/api/books')
     def save_book(book: Book):
         with book_lock:
-            return library.save_book(local/'library',book)
+            result=library.save_book(local/'library',book)
+        if (book.provenance.get('retrieved') or {}).get('cover_url'):
+            if not covers.image_path(local/'library'/result['path']):cover_queue.enqueue(result['path'])
+        return result
 
     @app.get('/api/books/download')
     def download_book(path: str):

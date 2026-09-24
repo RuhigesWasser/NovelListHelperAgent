@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import urllib.request
+from app.paths import replace_file
 
 
 DEFAULTS={'mode':'off','max_calls':3,'max_tokens':32768}
@@ -14,7 +15,7 @@ DEFAULTS={'mode':'off','max_calls':3,'max_tokens':32768}
 def write_json(path,data):
     temporary=path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
-    temporary.replace(path)
+    replace_file(temporary,path)
 
 
 def settings(local):

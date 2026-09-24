@@ -34,6 +34,14 @@ class MainlandTests(unittest.TestCase):
         self.assertIn('pageNum=3',fetch.call_args.args[0])
         self.assertEqual(result['items'][0]['match'],'author_conflict')
 
+    def test_qidian_prefers_matching_high_resolution_cover(self):
+        html=page({'bookInfo':{'bookId':123,'bookName':'书','authorName':'作者'}})
+        html+='<meta property="og:image" content="//bookcover.yuewen.com/123/180">'
+        data={'@graph':[{'@type':'Book','identifier':{'value':'999'},'image':'https://example.test/wrong'},
+                        {'@type':'Book','identifier':{'value':'123'},'image':'https://bookcover.yuewen.com/123/600'}]}
+        html+='<script type="application/ld+json">'+json.dumps(data)+'</script>'
+        self.assertEqual(mainland.qidian_detail(html,'123','https://m.qidian.com/book/123/')['cover_url'],'https://bookcover.yuewen.com/123/600')
+
     def test_qidian_catalog_skips_paid_and_checks_read_identity(self):
         data={'bookId':123,'vs':[{'vS':0,'vN':'正文','cs':[{'sS':1,'id':10,'cN':'第一章'}]},
                                {'vS':1,'vN':'付费','cs':[{'sS':1,'id':11,'cN':'第二章'}]}]}

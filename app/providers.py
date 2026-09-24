@@ -64,7 +64,7 @@ def record(platform, book_id, title, url, **fields):
     if platform == 'esj' and session and session.connected:
         method = 'session_html'
     result['field_sources'] = {key: {'url': url, 'method': method, 'fetched_at': fetched}
-        for key in ('title', 'author', 'word_count', 'tags', 'intro', 'original_url')
+        for key in ('title', 'author', 'word_count', 'tags', 'intro', 'original_url','cover_url')
         if result.get(key) not in (None, '', [])}
     if result['status'] != '未知':
         result['field_sources']['status'] = {'url': url, 'method': method, 'fetched_at': fetched}
@@ -198,10 +198,12 @@ def parse_esj(html, book_id, url):
     count_text = count.get_text(strip=True).replace(',', '') if count else ''
     description = soup.select_one('.description')
     tags = list(dict.fromkeys(a.get_text(strip=True) for a in soup.select('.widget-tags a.tag')))
+    cover=soup.select_one('.product-gallery img,.book-cover img')
+    cover_url=urllib.parse.urljoin(url,cover.get('data-src') or cover.get('src','')) if cover else ''
     return record('esj', book_id, heading.get_text(strip=True), url, author=values.get('作者', ''),
         word_count=int(count_text) if count_text.isdigit() else None, tags=tags,
         intro=description.get_text('\n', strip=True) if description else '', original_url=original,
-        updated_at=values.get('更新日期', ''), kind=values.get('類型', ''))
+        updated_at=values.get('更新日期', ''), kind=values.get('類型', ''),cover_url=cover_url)
 
 
 def detail(url):
@@ -215,7 +217,7 @@ def detail(url):
             raise ProviderError('菠萝包详情接口暂不可用') from None
         status = data['status'] if isinstance(raw.get('isFinish'), bool) else '未知'
         return record(platform, book_id, data['novelName'], canonical, author=data['authorName'] or '',
-            word_count=raw.get('charCount'), status=status, tags=data['tags'], intro=data['intro'])
+            word_count=raw.get('charCount'), status=status, tags=data['tags'], intro=data['intro'],cover_url=raw.get('novelCover') or '')
     html = fetch_html(canonical)
     if platform in ('qidian','ciweimao'):
         from app import mainland

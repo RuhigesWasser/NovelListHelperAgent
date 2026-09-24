@@ -22,6 +22,7 @@ TOOLS={
     'read_chapters':{'description':'读取最多三项章节，返回正文与来源。','input':{'url':'书籍 URL','selected_urls':'可选目录链接数组，最多三项'}},
     'archive_book':{'description':'按项目格式写入书库并更新索引。默认不覆盖。','input':library.Book.model_json_schema()},
     'list_books':{'description':'列出本地书籍档案。','input':{}},
+    'refresh_cover':{'description':'刷新已归档书籍的本地封面，失败时保留旧图。','input':{'path':'书库相对路径','replace_manual':'是否替换手动封面，默认 false'}},
     'login_saved_esj':{'description':'使用用户已保存配置建立内存会话；不返回账号密码。serve 模式可复用此会话。','input':{}},
 }
 
@@ -59,7 +60,17 @@ class AgentTools:
             selected,reason=chapters.esj_catalog.recommend(items) if platform=='esj' else suggested(platform,items)
             return {'platform':platform,'entries':items,'suggested_urls':[x['url'] for x in selected],'reason':reason}
         if action=='read_chapters':return chapters.preview(data['url'],selected_urls=data.get('selected_urls'))
-        if action=='archive_book':return library.save_book(self.local/'library',library.Book(**data))
+        if action=='archive_book':
+            saved=library.save_book(self.local/'library',library.Book(**data))
+            if data.get('url'):
+                from app import covers
+                saved['cover']=covers.refresh(self.local/'library',self.local/'library'/saved['path'])
+            return saved
+        if action=='refresh_cover':
+            from app import covers
+            path=(self.local/'library'/data['path']).resolve()
+            library.read_book(self.local/'library',path)
+            return covers.refresh(self.local/'library',path,bool(data.get('replace_manual')))
         if action=='list_books':
             base=self.local/'library'
             return [{'title':p.stem,'path':p.relative_to(base).as_posix()} for p in base.glob('*/*/*.md') if p.stem==p.parent.name]

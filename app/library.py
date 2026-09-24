@@ -56,6 +56,8 @@ def read_book(base,path):
     metadata=path.with_suffix('.metadata.json')
     try:record['provenance']=json.loads(metadata.read_text(encoding='utf8')).get('lookup') or {} if metadata.exists() else {}
     except (ValueError,UnicodeError):record['provenance']={}
+    from app import covers
+    record['cover']=covers.public(path)
     return record
 
 

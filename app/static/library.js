@@ -1,5 +1,24 @@
 'use strict';
 let libraryBooks=[],detailBook=null,detailRequest=0;
+let coverPoll=null;
+const coverBlobs=new Map(),coverLoads=new Map();
+function coverElement(book,large=false){
+  const cover=node('div',undefined,large?'book-mark large-cover':'book-mark');cover.setAttribute('aria-hidden','true');
+  let hue=0;for(const ch of book.category)hue=(hue+ch.charCodeAt(0))%95;
+  cover.style.setProperty('--book-hue',String(110+hue));cover.append(node('small',book.platform||'藏书'),node('strong',book.category==='待分类'?'书':book.category.slice(0,2)||'书'),node('i','拾页'));
+  if(book.cover?.has_image){
+    const img=node('img');img.alt='';img.decoding='async';img.loading=large?'eager':'lazy';
+    img.onload=()=>cover.classList.add('has-cover');img.onerror=()=>{img.remove();cover.classList.remove('has-cover');};cover.append(img);
+    const key=book.path+'@'+book.cover.version;
+    if(!coverLoads.has(key)&&!coverBlobs.has(key)){
+      const promise=api('/api/books/cover?'+new URLSearchParams({path:book.path,v:book.cover.version})).then(r=>r.blob()).then(blob=>{
+        const url=URL.createObjectURL(blob);coverBlobs.set(key,url);return url;
+      }).finally(()=>coverLoads.delete(key));coverLoads.set(key,promise);
+    }
+    Promise.resolve(coverBlobs.get(key)||coverLoads.get(key)).then(url=>{if(img.isConnected)img.src=url;}).catch(()=>{img.remove();});
+  }
+  return cover;
+}
 const bookDialog=$('#book-detail-dialog');
 const splitTags=value=>String(value||'').split(/[|｜]/).map(x=>x.trim()).filter(Boolean);
 function wordNumber(value){const text=String(value||'').replace(/[,，\s]/g,'');const match=text.match(/\d+(?:\.\d+)?/);return match?Number(match[0])*(text.includes('亿')?1e8:text.includes('万')?1e4:1):0;}
@@ -14,6 +33,14 @@ async function loadBooks(){
   $('#library-text-total').textContent=books.filter(b=>b.text_path).length;
   $('#library-platform-total').textContent=new Set(books.map(b=>b.platform).filter(Boolean)).size;
   renderLibrary();
+  const valid=new Set(books.map(b=>b.path+'@'+b.cover?.version));
+  for(const [key,url] of coverBlobs){if(!valid.has(key)){URL.revokeObjectURL(url);coverBlobs.delete(key);}}
+  if(detailBook&&bookDialog.open&&!$('#library-edit-form')){
+    const latest=books.find(b=>b.path===detailBook.path);
+    if(latest&&(JSON.stringify(latest.cover)!==JSON.stringify(detailBook.cover)||latest.cover_pending!==detailBook.cover_pending)){detailBook={...detailBook,cover:latest.cover,cover_pending:latest.cover_pending};renderBookDetail();}
+  }
+  clearTimeout(coverPoll);
+  if(!$('#library').hidden&&books.some(b=>b.cover_pending))coverPoll=setTimeout(()=>loadBooks().catch(e=>notice(e.message,true)),1500);
 }
 function renderLibrary(){
   const query=$('#library-query').value.trim().toLocaleLowerCase(),category=$('#library-category').value,platform=$('#library-platform').value,status=$('#library-status').value;
@@ -25,8 +52,7 @@ function renderLibrary(){
   if(!books.length){const empty=node('div',undefined,'library-empty');empty.append(node('h3',libraryBooks.length?'没有匹配的书籍':'书库还是空的'),node('p',libraryBooks.length?'换个关键词，或清除筛选条件。':'从帖子或截图开始整理，也可以手动添加书籍。'));list.append(empty);return;}
   for(const book of books){
     const card=node('article',undefined,'book-card');
-    const top=node('div',undefined,'book-card-top'),cover=node('div',undefined,'book-mark');cover.setAttribute('aria-hidden','true');
-    let hue=0;for(const ch of book.category)hue=(hue+ch.charCodeAt(0))%95;cover.style.setProperty('--book-hue',String(110+hue));cover.append(node('small',book.platform||'藏书'),node('strong',book.category==='待分类'?'书':book.category.slice(0,2)||'书'),node('i','拾页'));
+    const top=node('div',undefined,'book-card-top'),cover=coverElement(book);
     const info=node('div',undefined,'book-card-info'),heading=node('h3'),open=node('button',book.title,'book-title');open.type='button';open.setAttribute('aria-label',`查看《${book.title}》详情`);open.onclick=()=>openBookDetail(book.path);heading.append(open);
     const meta=node('div',undefined,'book-meta');meta.append(node('span',book.status||'未知','book-state'),node('span',wordLabel(book.words)));
     info.append(heading,node('p',`${book.author||'作者未填写'} · ${book.platform||'平台未填写'}`,'book-author'),meta);
@@ -61,6 +87,16 @@ function renderBookDetail(){
   const book=detailBook;$('#book-detail-error').hidden=true;$('#book-detail-title').textContent=book.title;$('#book-detail-category').textContent=book.category;
   $('#book-detail-subtitle').textContent=`${book.author||'作者未填写'} · ${book.platform||'平台未填写'}`;
   const body=$('#book-detail-body');body.replaceChildren();
+  const coverPanel=node('section',undefined,'cover-panel'),coverTools=node('div',undefined,'cover-tools');
+  coverPanel.append(coverElement(book,true));
+  const state=book.cover_pending?'正在获取封面…':book.cover?.has_image?(book.cover.origin==='manual'?'手动封面 · 已保存在本地':'平台封面 · 已缓存，可离线查看'):'尚未缓存封面';
+  coverTools.append(node('p',state,'help'));
+  if(book.cover?.error)coverTools.append(node('p',book.cover.error+(book.cover.has_image?'，保留原封面。':''),'help'));
+  const refresh=node('button',book.cover?.origin==='manual'?'恢复平台封面':book.cover?.has_image?'刷新封面':'获取封面','secondary');refresh.disabled=book.cover_pending||!book.url;
+  refresh.onclick=async()=>{refresh.disabled=true;try{await post('/api/books/cover',{path:book.path,replace_manual:book.cover?.origin==='manual'});await loadBooks();}catch(error){detailError(error.message);refresh.disabled=false;}};
+  const upload=node('button','上传封面','secondary'),file=node('input');file.type='file';file.accept='image/jpeg,image/png,image/webp,image/gif';file.hidden=true;file.setAttribute('aria-label','选择封面图片');upload.disabled=book.cover_pending;upload.onclick=()=>file.click();
+  file.onchange=async()=>{const image=file.files[0];if(!image)return;if(image.size>8*1024*1024){detailError('请选择不超过 8 MB 的图片');return;}upload.disabled=true;try{await json('/api/books/cover',{method:'PUT',body:JSON.stringify({path:book.path,image:await asBase64(image)})});await loadBooks();}catch(error){detailError(error.message);upload.disabled=false;}};
+  const controls=node('div',undefined,'actions');controls.append(refresh,upload,file);coverTools.append(controls);coverPanel.append(coverTools);body.append(coverPanel);
   const facts=node('dl',undefined,'detail-facts');for(const [name,value] of [['状态',book.status||'未知'],['篇幅',wordLabel(book.words)],['整理日期',book.saved_on||'未记录']]){const item=node('div');item.append(node('dt',name),node('dd',value));facts.append(item);}body.append(facts);
   const tags=node('div',undefined,'book-tags');for(const tag of splitTags(book.tags))tags.append(node('span',tag,'book-tag'));body.append(tags,detailSection('内容简介',book.intro||'暂无简介'),detailSection('我的评语',book.review&&book.review!=='【无】'?book.review:'尚未添加评语'));
   const source=detailSection('资料来源',book.source||'未记录'),links=node('div',undefined,'source-links');const original=externalLink('查看书籍原页 ↗',book.url);if(original)links.append(original);
@@ -109,3 +145,4 @@ async function readBookText(book){
   catch(error){if(request===readerRequest)$('#book-reader-note').textContent=error.message;}
 }
 $('#book-reader-dialog').addEventListener('close',()=>readerRequest++);
+$('#library-covers').onclick=async()=>{const button=$('#library-covers');button.disabled=true;try{const result=await post('/api/books/covers/missing');notice(result.queued?`正在补全 ${result.queued} 本书的封面。`:'没有需要补全的封面。');await loadBooks();}catch(error){notice(error.message,true);}finally{button.disabled=false;}};
