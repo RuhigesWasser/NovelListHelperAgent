@@ -2,8 +2,20 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 ROOT = next(parent for parent in Path(__file__).resolve().parents if (parent/'pyproject.toml').is_file())
+
+
+def replace_file(source,target):
+    """Allow brief Windows reader/virus-scanner locks to release before replace."""
+    for attempt in range(6):
+        try:
+            Path(source).replace(target)
+            return
+        except PermissionError:
+            if os.name!='nt' or attempt==5:raise
+            time.sleep(.02*(attempt+1))
 
 
 def configure(root=ROOT):

@@ -7,7 +7,7 @@ https://github.com/adk23333/NovelListHelperAgent
 
 当前 MIT 许可证仅适用于本项目发行源码，不对上述项目或其历史版本重新授权。
 
-以下依赖由包管理器安装，仍适用其各自许可证，不因本项目采用 MIT 而改变：
+以下第三方组件仍适用其各自许可证，不因本项目采用 MIT 而改变。Windows 程序包预置的 Python 许可证位于 `vendor/python/LICENSE.txt`，uv 许可证位于 `vendor/uv/licenses/`；含桌面组件的包将 .NET 与 WebView2 SDK 的许可文本保存在 `vendor/licenses/`；其他依赖由包管理器安装：
 
 | 组件 | 用途 | 官方来源 |
 | --- | --- | --- |

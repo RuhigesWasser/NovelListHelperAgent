@@ -15,9 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from PIL import Image, ImageOps
 from app import library
+from app import covers
 from app.library import Book,component,LibraryError
 from app.jobs import Jobs, active_pipeline
-from app.paths import ROOT, add_tools
+from app.paths import ROOT, add_tools, replace_file
 from app import providers, ocr_models, organize, chapters
 from app.llm_settings import LlmSettings
 from app.esj_session import ESJSession, ESJError
@@ -61,7 +62,23 @@ class Task(BaseModel):
     engine: str = 'builtin'
     image: str = Field(default='', max_length=28_000_000)
     language: str = 'zh'
-    auto_mode: Literal['off','local','llm'] = 'local'
+    auto_mode: Literal['off','local','llm','vision'] = 'local'
+
+
+class BookUpdate(BaseModel):
+    path: str
+    revision: str
+    book: Book
+
+
+class CoverRequest(BaseModel):
+    path: str = Field(max_length=2000)
+    replace_manual: bool = False
+
+
+class CoverUpload(BaseModel):
+    path: str = Field(max_length=2000)
+    image: str = Field(max_length=11_200_000)
 
 
 class ESJLogin(BaseModel):
@@ -71,12 +88,20 @@ class ESJLogin(BaseModel):
 
 
 class Extraction(BaseModel):
-    method: Literal['local', 'llm'] = 'local'
+    method: Literal['local', 'llm', 'vision'] = 'local'
+
+
+class OrganizeSettings(BaseModel):
+    auto_multi_book: bool = False
+
+
+class AppearanceSettings(BaseModel):
+    theme: Literal['system','light','dark'] = 'system'
 
 
 class RecoverySettings(BaseModel):
     mode: Literal['off','text','vision'] = 'off'
-    max_calls: int = Field(default=3,ge=1,le=10)
+    max_calls: int = Field(default=3,ge=1,le=1000)
     max_tokens: int = Field(default=32768,ge=256,le=262144)
 
 
@@ -104,7 +129,7 @@ class DetailRequest(BaseModel):
 
 class ChapterRequest(BaseModel):
     path: str = Field(min_length=1, max_length=1000)
-    selected_urls: list[str] | None = Field(default=None,max_length=3)
+    selected_urls: list[str] | None = Field(default=None,max_length=1000)
 
 
 class ReOCR(BaseModel):
@@ -130,11 +155,13 @@ def create_app(local, token, shutdown=lambda: None):
     esj_settings = ESJSettings(local)
     jobs = Jobs(local)
     book_lock = threading.RLock()
+    cover_queue=covers.CoverQueue(local/'library',esj_session.scope)
 
     @asynccontextmanager
     async def lifespan(app):
         yield
         jobs.close()
+        cover_queue.close()
         llm_settings.close()
         esj_session.clear()
         esj_settings.close()
@@ -146,7 +173,27 @@ def create_app(local, token, shutdown=lambda: None):
     app.state.esj_settings = esj_settings
 
     def model_config():
-        return {**llm_settings.current(),'recovery':recovery_tools.settings(local)}
+        return {**llm_settings.current(),'recovery':recovery_tools.settings(local),**organize_settings()}
+
+    @app.get('/api/appearance')
+    def appearance():
+        path=local/'ui-settings.json'
+        return AppearanceSettings(**(json.loads(path.read_text(encoding='utf8')) if path.exists() else {})).model_dump()
+
+    @app.post('/api/appearance')
+    def save_appearance(value: AppearanceSettings):
+        recovery_tools.write_json(local/'ui-settings.json',value.model_dump())
+        return value.model_dump()
+
+    @app.get('/api/organize/settings')
+    def organize_settings():
+        path=local/'organize-settings.json'
+        return OrganizeSettings(**(json.loads(path.read_text(encoding='utf8')) if path.exists() else {})).model_dump()
+
+    @app.post('/api/organize/settings')
+    def save_organize_settings(value: OrganizeSettings):
+        recovery_tools.write_json(local/'organize-settings.json',value.model_dump())
+        return value.model_dump()
 
     @app.get('/api/recovery/settings')
     def recovery_settings():
@@ -311,7 +358,7 @@ def create_app(local, token, shutdown=lambda: None):
     @app.get('/')
     def index():
         text = (ROOT/'app/static/index.html').read_text(encoding='utf-8')
-        return HTMLResponse(text.replace('__SESSION_TOKEN__', token))
+        return HTMLResponse(text.replace('__SESSION_TOKEN__', token).replace('__THEME__',appearance()['theme']))
 
     @app.get('/api/settings')
     def read_settings():
@@ -396,7 +443,7 @@ def create_app(local, token, shutdown=lambda: None):
                 extract_tid(value.source)
             except ValueError:
                 raise HTTPException(400, '请输入贴吧帖子链接或数字 ID') from None
-        current = llm_config(value.engine)
+        current = llm_config('llm' if value.auto_mode=='vision' else value.engine)
         if value.auto_mode == 'llm':
             try:
                 LlmOCR.from_config(current)
@@ -409,6 +456,7 @@ def create_app(local, token, shutdown=lambda: None):
     def start_organize(job_id: str, value: Extraction):
         config = model_config()
         try:
+            if value.method=='vision':config=llm_config('llm')
             if value.method == 'llm':
                 LlmOCR.from_config(config)
             return jobs.queue_pipeline(job_id,value.method,config)
@@ -487,7 +535,7 @@ def create_app(local, token, shutdown=lambda: None):
     def write_plan(path, data):
         temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-        temporary.replace(path)
+        replace_file(temporary,path)
 
     @app.get('/api/jobs/{job_id}/books')
     def read_plan(job_id: str):
@@ -512,19 +560,46 @@ def create_app(local, token, shutdown=lambda: None):
                 raise HTTPException(400, str(exc)) from None
         else:
             raw=json.loads((path.parent/'raw.json').read_text(encoding='utf8'))
-            plan = organize.extract(data['result'], data['floors'],raw.get('title',''))
+            progress=path.parent/'ocr-progress.json'
+            ocr_progress=json.loads(progress.read_text(encoding='utf8')).get('images',{}) if progress.exists() else {}
+            layouts=ocr_progress
+            layouts={key:entry for key,entry in layouts.items() if entry.get('text')==data['result'][int(key.split(':')[0])]['images'][int(key.split(':')[1])]}
+            plan = organize.extract(data['result'], data['floors'],raw.get('title',''),layouts)
+            for skipped in plan['skipped']:
+                failed=ocr_progress.get(f"{skipped['floor_index']}:{skipped['image_index']}",{})
+                if failed.get('state')=='failed':skipped['reason']='OCR 失败：'+failed.get('error','无法识别图片')
+        if method=='vision':plan=enrich_plan(job_id,plan,method,config)
         with book_lock:
+            previous=read_plan(job_id)
+            preserved=[item for item in previous['items'] if item['state'] in ('archived','confirmed','verified') or item.get('user_edited')]
+            for item in preserved:
+                plan['items']=[fresh for fresh in plan['items'] if not (fresh['floor_index']==item['floor_index'] and fresh['image_index']==item['image_index'] and providers.normalize(fresh['title'])==providers.normalize(item['title']))]
+            plan['items']=preserved+plan['items']
+            organize.apply_multi_policy(plan,config.get('auto_multi_book',False))
             write_plan(path, plan)
         return read_plan(job_id)
+
+    def enrich_plan(job_id,plan,method,config,targets=None):
+        if method!='vision' and config.get('recovery',{}).get('mode') not in ('vision','text'):return plan
+        from app import image_books
+        folder=local/'jobs'/job_id
+        data=result(job_id);raw=json.loads((folder/'raw.json').read_text(encoding='utf8'))
+        if method=='vision':
+            config=llm_config('llm');client=LlmOCR.from_config(config)
+        else:client=None
+        recovery=recovery_tools.Recovery(folder,config,lambda:jobs.check_pipeline(job_id) if active_pipeline.get()==job_id else None)
+        return image_books.augment(plan,data['result'],data['floors'],raw,folder,recovery,client,targets=targets)
 
     @app.post('/api/jobs/{job_id}/books/{item_id}/verify')
     def verify_book(job_id: str, item_id: int, value: ProposalChoice):
         path = plan_path(job_id)
-        edit_proposal(job_id, item_id, Proposal(**value.model_dump()))
+        edited=edit_proposal(job_id, item_id, Proposal(**value.model_dump()))
         data = result(job_id)
         if value.floor_index >= len(data['floors']) or value.image_index >= data['images'][value.floor_index]:
             raise HTTPException(400, '请选择有效图片来源')
         item = value.model_dump(exclude={'url'})
+        item['user_selected']=True
+        item.update({key:edited[key] for key in ('user_edited','extraction','alternative_titles','alternative_queries','title_complete') if key in edited})
         item['floor'] = data['floors'][value.floor_index]
         try:
             if value.url:
@@ -561,6 +636,13 @@ def create_app(local, token, shutdown=lambda: None):
             plan = read_plan(job_id)
             if item_id < 0 or item_id > len(plan['items']):
                 raise HTTPException(400, '书籍序号无效')
+            previous=plan['items'][item_id] if item_id<len(plan['items']) else {}
+            item['user_edited']=bool(previous.get('user_edited') or not previous or any(previous.get(key)!=item.get(key) for key in ('title','author','platform','category')))
+            if previous.get('extraction'):item['extraction']=previous['extraction']
+            if all(previous.get(key)==item.get(key) for key in ('title','author','platform')):
+                if 'title_complete' in previous:item['title_complete']=previous['title_complete']
+                for field in ('alternative_titles','alternative_queries'):
+                    if previous.get(field):item[field]=previous[field]
             if item_id == len(plan['items']):
                 plan['items'].append(item)
             else:
@@ -577,6 +659,7 @@ def create_app(local, token, shutdown=lambda: None):
             for item in plan['items']:
                 if item['state'] not in ('verified', 'confirmed'):
                     continue
+                if item.get('manual_selection_required') and not item.get('user_selected'):continue
                 book = item['book']
                 try:
                     if active_pipeline.get() == job_id:
@@ -602,48 +685,70 @@ def create_app(local, token, shutdown=lambda: None):
                     item.pop('reason', None)
                 except (HTTPException,LibraryError) as exc:
                     item['archive_error'] = str(exc.detail)
+            if active_pipeline.get() != job_id:
+                count = sum(item['state'] == 'archived' for item in plan['items'])
+                pending = len(plan['items']) - count
+                skipped = len(plan.get('skipped', []))
+                if not pending and not skipped:
+                    plan.pop('review_notice', None)
+                jobs.pipeline_status(job_id, 'review' if pending or skipped else 'succeeded',
+                    f'归档 {count} 本，待处理 {pending} 本，未提取图片 {skipped} 张')
             write_plan(path, plan)
         return read_plan(job_id)
 
     def run_workflow(job_id, method, config):
         with esj_session.scope():
-            plan = read_plan(job_id)
-            if not plan['items']:
-                plan = extract_plan(job_id,method,config)
+            plan=read_plan(job_id)
+            if not plan['items']:plan=extract_plan(job_id,method,config)
+            organize.apply_multi_policy(plan,config.get('auto_multi_book',False))
             recovery=recovery_tools.Recovery(local/'jobs'/job_id,config,lambda:jobs.check_pipeline(job_id))
-            ocr_result=result(job_id)['result']
-            raw=json.loads((local/'jobs'/job_id/'raw.json').read_text(encoding='utf8'))
-            for index, item in enumerate(plan['items']):
-                jobs.check_pipeline(job_id)
-                if item['state'] in ('archived','verified','confirmed'):
-                    continue
-                jobs.pipeline_status(job_id,'running',f'核对书籍 {index+1}/{len(plan["items"])}')
-                try:
-                    verified=recovery.lookup(item,lambda proposal:verify_book(job_id,index,ProposalChoice(**proposal)))
-                    if verified['state']=='review' and config.get('recovery',{}).get('mode','off')!='off':
-                        source=ocr_result[item['floor_index']]['images'][item['image_index']]
-                        image_path=contained(local/'jobs'/job_id,raw['floors'][item['floor_index']]['images'][item['image_index']]['file'])
-                        fixed=recovery.verify_book(verified,source,organize.verify,image_path)
-                        jobs.check_pipeline(job_id)
-                        with book_lock:
-                            latest=read_plan(job_id);latest['items'][index]=fixed
-                            write_plan(plan_path(job_id),latest)
-                except (providers.ProviderError,HTTPException,ValueError) as exc:
-                    reason = str(exc.detail) if isinstance(exc,HTTPException) else str(exc)
-                    if config.get('key'):
-                        reason = reason.replace(config['key'],'[已隐藏]')
-                    with book_lock:
-                        latest = read_plan(job_id)
-                        latest['items'][index].update(state='review',reason=reason,error=reason)
-                        write_plan(plan_path(job_id),latest)
+            def check_items(stage):
+                for index,item in enumerate(plan['items']):
+                    jobs.check_pipeline(job_id)
+                    if item['state'] in ('archived','verified','confirmed'):continue
+                    if item.get('manual_selection_required'):continue
+                    jobs.pipeline_status(job_id,'running',f'{stage} {index+1}/{len(plan["items"])}')
+                    try:plan['items'][index]=recovery.lookup(item,organize.verify)
+                    except (providers.ProviderError,ValueError) as error:
+                        plan['items'][index]={**item,'state':'review','reason':recovery.clean(error)}
+                    with book_lock:write_plan(plan_path(job_id),plan)
+            check_items('核对 OCR 结果')
+            targets={(item['floor_index'],item['image_index']) for item in plan['items'] if item['state']=='review' and not item.get('manual_selection_required')}
+            manual_sources={(item['floor_index'],item['image_index']) for item in plan['items'] if item.get('manual_selection_required')}
+            targets.update((item['floor_index'],item['image_index']) for item in plan.get('skipped',[]) if (item['floor_index'],item['image_index']) not in manual_sources)
+            mode=config.get('recovery',{}).get('mode','off')
+            configured=bool(config.get('base_url') and config.get('model'))
+            if targets and mode=='vision' and configured and method!='vision':
+                jobs.pipeline_status(job_id,'running',f'多模态兜底：处理 {len(targets)} 张未通过的图片')
+                plan=enrich_plan(job_id,plan,'local',config,targets)
+                organize.apply_multi_policy(plan,config.get('auto_multi_book',False))
+                with book_lock:write_plan(plan_path(job_id),plan)
+                check_items('核对多模态结果')
+            elif targets and mode=='text' and configured:
+                ocr_result=result(job_id)['result']
+                for index,item in enumerate(plan['items']):
+                    if item['state']!='review':continue
+                    if item.get('manual_selection_required'):continue
+                    source=ocr_result[item['floor_index']]['images'][item['image_index']]
+                    plan['items'][index]=recovery.verify_book(item,source,organize.verify)
+                with book_lock:write_plan(plan_path(job_id),plan)
             jobs.check_pipeline(job_id)
-            jobs.pipeline_status(job_id,'running','归档书籍')
-            plan = archive_plan(job_id)
-            count = sum(i['state']=='archived' for i in plan['items'])
-            pending = len(plan['items'])-count
-            skipped = len(plan.get('skipped',[]))
-            state = 'review' if pending or skipped else 'succeeded'
-            return state,f'归档 {count} 本，待核对 {pending} 本，未提取图片 {skipped} 张'
+            with book_lock:write_plan(plan_path(job_id),plan)
+            jobs.pipeline_status(job_id,'running','归档已确认书籍')
+            plan=archive_plan(job_id)
+            count=sum(item['state']=='archived' for item in plan['items'])
+            pending=len(plan['items'])-count;skipped=len(plan.get('skipped',[]))
+            if pending or skipped:
+                plan['review_notice']='以下内容未能自动确认，请核对原图、编辑资料或选择候选。模糊匹配不会自动归档。'
+                unresolved=skipped or any(item['state']!='archived' and not item.get('manual_selection_required') for item in plan['items'])
+                if any(item.get('manual_selection_required') for item in plan['items']):plan['review_notice']='一图多书的自动处理已关闭，请逐本选择要整理的书籍。'+plan['review_notice']
+                if unresolved and (mode!='vision' or not configured):
+                    plan['review_notice']+='可在设置中配置多模态 LLM，并启用多模态兜底后重试。'
+                elif unresolved:plan['review_notice']+='多模态处理后仍未通过的原因保留在各项中。'
+            else:plan.pop('review_notice',None)
+            with book_lock:write_plan(plan_path(job_id),plan)
+            state='review' if pending or skipped else 'succeeded'
+            return state,f'归档 {count} 本，待处理 {pending} 本，未提取图片 {skipped} 张'
 
     jobs.pipeline = run_workflow
 
@@ -682,16 +787,70 @@ def create_app(local, token, shutdown=lambda: None):
     @app.get('/api/books')
     def books():
         base = local/'library'
-        return [{'title': p.stem, 'category': p.parent.parent.name, 'path': p.relative_to(base).as_posix(),
+        return [{**library.read_book(base,p),'cover_pending':cover_queue.is_pending(p.relative_to(base).as_posix()),
                  'is_esj': bool(re.search(r'^- 链接（如有）：https://(?:www\.)?esjzone\.(?:one|cc)/detail/',p.read_text(encoding='utf-8'),re.M)),
                  'choose_chapters': bool(re.search(r'^- 链接（如有）：https://(?:(?:www\.)?esjzone\.(?:one|cc)/detail/|(?:www\.|wap\.)?ciweimao\.com/book/)',p.read_text(encoding='utf-8'),re.M)),
                  'text_path': p.with_suffix('.txt').relative_to(base).as_posix() if p.with_suffix('.txt').exists() else None}
                 for p in sorted(base.glob('*/*/*.md')) if p.name == p.parent.name + '.md']
 
+    @app.get('/api/books/detail')
+    def stored_book(path: str):
+        target=contained(local/'library',local/'library'/path)
+        if not target.is_file():raise HTTPException(404,'书籍不存在')
+        return {**library.read_book(local/'library',target),'cover_pending':cover_queue.is_pending(path)}
+
+    @app.get('/api/books/cover')
+    def cover_image(path: str):
+        target=contained(local/'library',local/'library'/path)
+        stored_book(path)
+        image=covers.image_path(target)
+        if not image:raise HTTPException(404,'尚未缓存封面')
+        return FileResponse(image,media_type='image/png' if image.suffix=='.png' else 'image/jpeg',headers={'Cache-Control':'private, max-age=86400','X-Content-Type-Options':'nosniff'})
+
+    @app.post('/api/books/cover')
+    def refresh_cover(value: CoverRequest):
+        book=stored_book(value.path)
+        if book['cover'].get('origin')=='manual' and not value.replace_manual:raise HTTPException(409,'当前为手动封面，可选择恢复平台封面')
+        queued=cover_queue.enqueue(value.path,value.replace_manual)
+        return {'queued':queued,'cover':book['cover']}
+
+    @app.post('/api/books/covers/missing')
+    def missing_covers():
+        count=0
+        for book in books():
+            if not book['cover']['has_image'] and book['url'] and count<500:
+                count+=int(cover_queue.enqueue(book['path']))
+        return {'queued':count}
+
+    @app.put('/api/books/cover')
+    def upload_cover(value: CoverUpload):
+        target=contained(local/'library',local/'library'/value.path)
+        stored_book(value.path)
+        try:return covers.upload(local/'library',target,base64.b64decode(value.image,validate=True))
+        except (ValueError,covers.CoverError):raise HTTPException(400,'请选择不超过 8 MB 的 JPG、PNG、WebP 或 GIF 图片') from None
+
+    @app.put('/api/books/detail')
+    def update_stored_book(value: BookUpdate):
+        with book_lock:
+            current=stored_book(value.path)
+            if current['revision']!=value.revision:raise HTTPException(409,'书籍已被其他操作更新，请关闭详情后重新打开')
+            if (value.book.title,value.book.category)!=(current['title'],current['category']):raise HTTPException(400,'此处只编辑资料，不能更改书名或分类路径')
+            provenance=dict(current['provenance'])
+            edited=set(provenance.get('user_edited_fields',[]))
+            edited.update(key for key in ('author','platform','words','status','tags','intro','review','source','url') if getattr(value.book,key)!=current.get(key,''))
+            provenance['user_edited_fields']=sorted(edited)
+            book=value.book.model_copy(update={'overwrite':True,'provenance':provenance})
+            library.save_book(local/'library',book)
+            if current['url']!=book.url and book.url and current['cover'].get('origin')!='manual':cover_queue.enqueue(value.path)
+            return stored_book(value.path)
+
     @app.post('/api/books')
     def save_book(book: Book):
         with book_lock:
-            return library.save_book(local/'library',book)
+            result=library.save_book(local/'library',book)
+        if (book.provenance.get('retrieved') or {}).get('cover_url'):
+            if not covers.image_path(local/'library'/result['path']):cover_queue.enqueue(result['path'])
+        return result
 
     @app.get('/api/books/download')
     def download_book(path: str):
@@ -712,7 +871,7 @@ def create_app(local, token, shutdown=lambda: None):
 
     @app.post('/api/books/catalog')
     def book_catalog(value: ChapterRequest):
-        _,url=chapter_source(value)
+        target,url=chapter_source(value)
         platform,entries=chapters.catalog(url)
         if platform=='esj':
             suggested,reason=chapters.esj_catalog.recommend(entries)
@@ -720,18 +879,22 @@ def create_app(local, token, shutdown=lambda: None):
             from app.mainland import suggested as suggest_chapters
             suggested,reason=suggest_chapters(platform,entries)
         return {'platform':platform,'entries':entries,'suggested_urls':[e['url'] for e in suggested],
-                'selection_reason':reason}
+                'selection_reason':reason,'saved_urls':[e.get('url','') for e in chapters.saved(target)['chapters']]}
+
+    @app.get('/api/books/reader')
+    def book_reader(path: str):
+        target=contained(local/'library',local/'library'/path)
+        if not target.is_file() or target.suffix!='.md':raise HTTPException(404,'书籍不存在')
+        with book_lock:return chapters.saved(target)
 
     @app.post('/api/books/chapters')
     def book_chapters(value: ChapterRequest):
         target,url=chapter_source(value)
         result = chapters.preview(url,selected_urls=value.selected_urls)
-        content = '\n\n'.join(f'{c["title"]}\n来源：{c["url"]}\n\n{c["content"]}' for c in result['chapters'])
         with book_lock:
-            target.with_suffix('.txt').write_text(content, encoding='utf-8')
-            target.with_suffix('.chapters.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+            combined=chapters.save(target,result)
         return {'path': target.with_suffix('.txt').relative_to(local/'library').as_posix(),
-                'count': len(result['chapters']), 'warnings': result['warnings']}
+                'count': len(result['chapters']), 'total':len(combined['chapters']), 'warnings': result['warnings']}
 
     @app.post('/api/shutdown')
     def stop():

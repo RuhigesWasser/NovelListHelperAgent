@@ -6,7 +6,7 @@ import zipfile
 
 ROOT=Path(__file__).resolve().parents[1]
 EDITION_NAMES=('agent','browser','windows')
-CORE=('__init__','paths','agent_tools','providers','organize','chapters','library','esj_session','esj_settings','esj_catalog','fanqie_text','ocr_models','llm_settings','mainland')
+CORE=('__init__','paths','agent_tools','providers','organize','chapters','library','esj_session','esj_settings','esj_catalog','fanqie_text','ocr_models','llm_settings','mainland','covers','image_books','recovery')
 SUFFIXES={'.py','.js','.css','.html','.json','.md','.txt','.cs','.csproj','.ps1','.sh','.cmd','.command','.toml','.lock'}
 
 
@@ -20,6 +20,8 @@ def copy_source(destination,edition='browser'):
         target=destination/(relative if relative is not None else source.relative_to(ROOT))
         target.parent.mkdir(parents=True,exist_ok=True)
         shutil.copy2(source,target)
+        if source.suffix in ('.sh','.command'):
+            target.write_bytes(target.read_bytes().replace(b'\r\n',b'\n'))
     def tree(relative,target=None):
         base=ROOT/relative
         for source in base.rglob('*'):
@@ -28,10 +30,11 @@ def copy_source(destination,edition='browser'):
                 copy(source,Path(target or relative)/source.relative_to(base))
     for name in ('LICENSE','THIRD_PARTY_NOTICES.md','.gitattributes'):
         copy(ROOT/name)
+    copy(ROOT/'download-sources.conf')
     copy(ROOT/'editions'/edition/'README.md','README.md')
     copy(ROOT/'docs/USAGE.md')
-    (destination/'.gitignore').write_text('.runtime/\n.local/\ntmp/\ndist/\n__pycache__/\n*.py[cod]\n.env*\n**/bin/\n**/obj/\n',encoding='utf8')
-    for name in ('launcher.ps1','launcher.sh','app_control.py'):
+    (destination/'.gitignore').write_text('vendor/\n.runtime/\n.local/\ntmp/\ndist/\n__pycache__/\n*.py[cod]\n.env*\n**/bin/\n**/obj/\n',encoding='utf8')
+    for name in ('launcher.ps1','launcher.sh','app_control.py','bundle_bootstrap.py'):
         copy(ROOT/'scripts'/name)
     if edition=='agent':
         copy(ROOT/'.agents/AGENT.md')
@@ -81,6 +84,7 @@ def main():
     parser.add_argument('--stage',type=Path);parser.add_argument('--zip',type=Path)
     parser.add_argument('--edition',choices=EDITION_NAMES,default='browser')
     parser.add_argument('--all-projects',type=Path)
+    parser.add_argument('--windows-bootstrap',action='store_true')
     args=parser.parse_args()
     if args.all_projects:
         for edition in EDITION_NAMES:
@@ -89,6 +93,9 @@ def main():
         for edition in EDITION_NAMES:copy_source(args.all_projects/edition,edition)
     elif args.stage:
         copy_source(args.stage,args.edition)
+        if args.windows_bootstrap:
+            from scripts.bundle_bootstrap import bundle_windows_bootstrap
+            bundle_windows_bootstrap(args.stage)
         if args.zip:archive(args.stage,args.zip)
     else:parser.error('Specify --stage or --all-projects')
 

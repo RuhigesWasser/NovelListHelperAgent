@@ -53,8 +53,13 @@ class BuiltinOCR:
     def __call__(self, path):
         from PIL import Image, ImageOps
         lines = []
+        self.last_layout=[]
         with Image.open(path) as source:
             im = ImageOps.exif_transpose(source).convert('RGB')
+        # Very wide screenshots can lose isolated characters in the detector's
+        # internal resize. Normalize width before splitting the long image.
+        if im.width>1800:
+            im=im.resize((1800,round(im.height*1800/im.width)),Image.Resampling.LANCZOS)
         # 长截图分段并保留重叠，按文字框中心归属去重，避免整张缩小后小字丢失。
         for start in range(0, im.height, 1400):
             top, bottom = max(0, start - 100), min(im.height, start + 1500)
@@ -66,6 +71,7 @@ class BuiltinOCR:
                 center = sum(float(point[1]) for point in box) / len(box) + top
                 if start <= center < min(im.height, start + 1400):
                     lines.append(text)
+                    self.last_layout.append({'text':text,'box':[[float(x),float(y)+top] for x,y in box],'score':float(score)})
         return '\n'.join(lines)
 
 

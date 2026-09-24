@@ -126,8 +126,8 @@ class Jobs:
             with self.lock:
                 if self.get(job_id)['state'] == 'running':
                     error = folder/'error.txt'
-                    if proc.returncode == 0 and (folder/'result.json').is_file():
-                        self.update(job_id, 'succeeded')
+                    if (proc.returncode == 0 or (proc.returncode == 2 and spec['auto_mode']!='off')) and (folder/'result.json').is_file():
+                        self.update(job_id, 'succeeded',error.read_text(encoding='utf8') if proc.returncode==2 and error.exists() else '')
                     else:
                         self.update(job_id, 'failed', error.read_text(encoding='utf-8') if error.exists() else '识别进程异常结束')
             if self.get(job_id)['state'] == 'succeeded' and spec['auto_mode'] != 'off':

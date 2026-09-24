@@ -28,10 +28,16 @@ def qidian_detail(html,book_id,url):
     if str(data.get('bookId'))!=book_id or not data.get('bookName'):raise providers.ProviderError('起点详情与书籍 ID 不一致')
     soup=BeautifulSoup(html,'html.parser')
     image=soup.select_one('meta[property="og:image"]')
+    cover_url=urljoin(url,image['content']) if image else ''
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            for value in json.loads(script.text).get('@graph',[]):
+                if value.get('@type')=='Book' and str((value.get('identifier') or {}).get('value'))==book_id and isinstance(value.get('image'),str):cover_url=urljoin(url,value['image'])
+        except (ValueError,TypeError,AttributeError):continue
     return providers.record('qidian',book_id,data['bookName'],url,author=data.get('authorName') or '',
         intro=plain(data.get('desc')),word_count=data.get('wordsCnt'),status=status(data.get('bookStatus')),
         tags=list(dict.fromkeys([x for x in (data.get('chanName'),data.get('subCateName')) if x]+[x['tag'] for x in data.get('bookLabels',[]) if x.get('tag')]+[x.get('tagName') or x['TagName'] for x in (page.get('bookExtra') or {}).get('ugcTagInfos',[]) if x.get('tagName') or x.get('TagName')])),
-        cover_url=urljoin(url,image['content']) if image else '')
+        cover_url=cover_url)
 
 
 def qidian_search(title,page=0):

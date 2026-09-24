@@ -18,18 +18,18 @@ class ModelTest(unittest.TestCase):
         self.context.start();self.addCleanup(self.context.stop)
 
     def test_consent_required_before_any_write_or_network(self):
-        with patch('urllib.request.urlopen') as network:
+        with patch('app.ocr_models.urlopen') as network:
             with self.assertRaises(ValueError):m.install('japan',False)
             network.assert_not_called()
         self.assertFalse(self.directory.exists())
 
     def test_require_does_not_download(self):
-        with patch('urllib.request.urlopen') as network:
+        with patch('app.ocr_models.urlopen') as network:
             with self.assertRaises(ValueError):m.require('japan')
             network.assert_not_called()
 
     def test_checksum_failure_never_installs(self):
-        with patch('urllib.request.urlopen',return_value=io.BytesIO(b'wrong')):
+        with patch('app.ocr_models.urlopen',return_value=io.BytesIO(b'wrong')):
             with self.assertRaisesRegex(ValueError,'校验失败'):m.install('japan',True)
         self.assertFalse((self.directory/m.MODELS['japan']['file']).exists())
         self.assertEqual(list(self.directory.glob('*.part')),[])
@@ -37,7 +37,7 @@ class ModelTest(unittest.TestCase):
     def test_verified_model_usable_and_not_downloaded_again(self):
         data=b'test-model'
         models={'japan':{'name':'日文','file':'japan.onnx','sha256':hashlib.sha256(data).hexdigest()}}
-        with patch.object(m,'MODELS',models),patch('urllib.request.urlopen',return_value=io.BytesIO(data)) as network:
+        with patch.object(m,'MODELS',models),patch('app.ocr_models.urlopen',return_value=io.BytesIO(data)) as network:
             m.install('japan',True)
             self.assertEqual(m.require('japan').read_bytes(),data)
             m.install('japan',True)

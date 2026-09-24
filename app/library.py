@@ -2,6 +2,7 @@
 from datetime import date
 import json
 import os
+import hashlib
 from pathlib import Path
 import re
 from pydantic import BaseModel,Field
@@ -37,6 +38,27 @@ def component(name):
             {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}):
         raise LibraryError('书名或分类包含不适合作为目录名的字符')
     return name
+
+
+def read_book(base,path):
+    base=Path(base).resolve();path=Path(path).resolve()
+    if not path.is_relative_to(base) or path.suffix!='.md' or path.stem!=path.parent.name:
+        raise LibraryError('无效的书籍路径')
+    content=path.read_bytes();text=content.decode('utf-8-sig').replace('\r\n','\n')
+    headings=r'基本信息|内容简介|笔者评语|元数据'
+    sections=dict(re.findall(r'^## ('+headings+r')\s*\n(.*?)(?=^## (?:'+headings+r')\s*$|\Z)',text,re.M|re.S))
+    fields=dict(re.findall(r'^- ([^：\n]+)：(.*)$',sections.get('基本信息','')+'\n'+sections.get('元数据',''),re.M))
+    record={'title':path.stem,'category':path.parent.parent.name,'path':path.relative_to(base).as_posix(),
+        'intro':sections.get('内容简介','').strip(),'review':sections.get('笔者评语','').strip(),
+        'revision':hashlib.sha256(content).hexdigest(),'saved_on':fields.get('整理日期',''),
+        'text_path':path.with_suffix('.txt').relative_to(base).as_posix() if path.with_suffix('.txt').is_file() else None}
+    for key,label in {'author':'作者','platform':'平台','words':'字数','status':'状态','tags':'题材标签','source':'整理来源','url':'链接（如有）'}.items():record[key]=fields.get(label,'')
+    metadata=path.with_suffix('.metadata.json')
+    try:record['provenance']=json.loads(metadata.read_text(encoding='utf8')).get('lookup') or {} if metadata.exists() else {}
+    except (ValueError,UnicodeError):record['provenance']={}
+    from app import covers
+    record['cover']=covers.public(path)
+    return record
 
 
 def save_book(base, book):

@@ -14,6 +14,7 @@ from app.paths import add_tools
 from app.esj_session import current_session, ESJSession, ESJError, HOSTS as ESJ_HOSTS
 
 add_tools()
+from direct_http import DirectFirst, urlopen
 PLATFORMS = {
     'qidian': {'name':'起点中文网','search':True,'detail':True,'note':'使用官方移动页查询资料和公开免费章节。'},
     'ciweimao': {'name':'刺猬猫','search':True,'detail':True,'note':'支持书名搜索与详情；部分阅读页需要网页验证或登录。'},
@@ -64,7 +65,7 @@ def record(platform, book_id, title, url, **fields):
     if platform == 'esj' and session and session.connected:
         method = 'session_html'
     result['field_sources'] = {key: {'url': url, 'method': method, 'fetched_at': fetched}
-        for key in ('title', 'author', 'word_count', 'tags', 'intro', 'original_url')
+        for key in ('title', 'author', 'word_count', 'tags', 'intro', 'original_url','cover_url')
         if result.get(key) not in (None, '', [])}
     if result['status'] != '未知':
         result['field_sources']['status'] = {'url': url, 'method': method, 'fetched_at': fetched}
@@ -121,10 +122,10 @@ def fetch_html(url):
         if urllib.parse.urlsplit(url).hostname in ESJ_HOSTS:
             body = (session or ESJSession()).fetch(request)
         else:
-            opener=urllib.request.build_opener(SiteRedirect())
+            opener=DirectFirst(SiteRedirect())
             if urllib.parse.urlsplit(url).hostname in ('www.ciweimao.com','wap.ciweimao.com'):
                 if not hasattr(_site_clients,'ciweimao'):
-                    _site_clients.ciweimao=urllib.request.build_opener(SiteRedirect(),urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+                    _site_clients.ciweimao=DirectFirst(SiteRedirect(),urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
                     with _site_clients.ciweimao.open(urllib.request.Request('https://www.ciweimao.com/',headers={'User-Agent':'Mozilla/5.0'}),timeout=20) as landing:landing.read()
                 opener=_site_clients.ciweimao
                 request.add_header('Referer','https://www.ciweimao.com/')
@@ -198,10 +199,12 @@ def parse_esj(html, book_id, url):
     count_text = count.get_text(strip=True).replace(',', '') if count else ''
     description = soup.select_one('.description')
     tags = list(dict.fromkeys(a.get_text(strip=True) for a in soup.select('.widget-tags a.tag')))
+    cover=soup.select_one('.product-gallery img,.book-cover img')
+    cover_url=urllib.parse.urljoin(url,cover.get('data-src') or cover.get('src','')) if cover else ''
     return record('esj', book_id, heading.get_text(strip=True), url, author=values.get('作者', ''),
         word_count=int(count_text) if count_text.isdigit() else None, tags=tags,
         intro=description.get_text('\n', strip=True) if description else '', original_url=original,
-        updated_at=values.get('更新日期', ''), kind=values.get('類型', ''))
+        updated_at=values.get('更新日期', ''), kind=values.get('類型', ''),cover_url=cover_url)
 
 
 def detail(url):
@@ -215,7 +218,7 @@ def detail(url):
             raise ProviderError('菠萝包详情接口暂不可用') from None
         status = data['status'] if isinstance(raw.get('isFinish'), bool) else '未知'
         return record(platform, book_id, data['novelName'], canonical, author=data['authorName'] or '',
-            word_count=raw.get('charCount'), status=status, tags=data['tags'], intro=data['intro'])
+            word_count=raw.get('charCount'), status=status, tags=data['tags'], intro=data['intro'],cover_url=raw.get('novelCover') or '')
     html = fetch_html(canonical)
     if platform in ('qidian','ciweimao'):
         from app import mainland
@@ -303,7 +306,7 @@ def search_fanqie(title, page=0):
     url = FANQIE_SEARCH + '?' + urllib.parse.urlencode(params)
     request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=20) as response:
             payload = json.load(response)
         if payload.get('code') != 0:
             raise ProviderError(f'番茄搜索失败：{payload.get("message", "未知错误")}')

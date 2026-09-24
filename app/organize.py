@@ -7,8 +7,22 @@ from app import providers
 GENRES = ('校园', '科幻', '魔幻', '都市', '玄幻', '古风', '游戏', '悬疑', '同人', '仙侠')
 
 
+def apply_multi_policy(plan,automatic=False):
+    groups={}
+    for item in plan['items']:groups.setdefault((item['floor_index'],item['image_index']),[]).append(item)
+    for items in groups.values():
+        for item in items:
+            if automatic or (len(items)<2 and not any(entry.get('multiple_books') for entry in items)):
+                item.pop('manual_selection_required',None)
+            elif item['state'] not in ('archived','confirmed') and not item.get('user_selected'):
+                item.update(state='review',manual_selection_required=True,
+                            reason='此图包含多本书，自动处理一图多书已关闭。请选择要整理的书籍。')
+    return plan
+
+
 def clean_header(lines):
-    return [s for s in lines if s and re.search(r'[\u3400-\u9fff]', s)
+    return [s for s in lines if s and any(c.isalpha() for c in s)
+            and s not in ('VIP','返回','首页','详情','作品详情','SF轻小说','菠萝包','起点读书','刺猬猫','番茄小说')
             and not re.search(r'美团|小红书|下拉刷新|书圈|书架|KB/|签约|日更', s, re.I)]
 
 
@@ -32,7 +46,13 @@ def join_title(lines):
 def image_hint(text):
     lines = [s.strip() for s in text.splitlines() if s.strip()]
     platform, title, author, category = '', '', '', '待分类'
-    if '起点' in text or '刀片' in text:
+    compact=next(((i,m) for i,s in enumerate(lines[:12]) if (m:=re.fullmatch(r'(?:连载中|连载|已完结|完结)[|丨｜1Il\s]+([^|丨｜\d]+?)[|丨｜1Il\s]*[\d.]+万?字',s))),None)
+    if compact and compact[0]>0:
+        end,match=compact
+        platform='sfacg';category=match[1].strip()
+        title=join_title(clean_header([s for s in lines[:end] if s!='VIP']))
+        author=lines[end+1] if end+1<len(lines) else ''
+    elif '起点' in text or '刀片' in text:
         platform='qidian' if '起点' in text else 'ciweimao'
         author_links=[(i,s.rstrip('>＞ ').strip()) for i,s in enumerate(lines[:12]) if s.endswith(('>','＞')) and not re.search(r'票|荣誉|指数|目录',s)]
         signed=next(((i,s[:-1].strip()) for i,s in enumerate(lines[:12]) if s.endswith('著')),None)
@@ -86,7 +106,27 @@ def image_hint(text):
 
 
 def image_hints(text,context=''):
+    text=text.replace('\r','\n')
     lines=[s.strip() for s in text.splitlines() if s.strip()]
+    if '已加入书架' in text and '去详情' in text:
+        author_row=next((i for i,line in enumerate(lines) if re.search(r'[·・].*(小时前|分钟前|天前|刚刚|更新)',line)),None)
+        if author_row is not None:
+            heading=next((line for line in lines[:author_row] if len(line)>2 and line not in ('继续阅读','书架','返回')), '')
+            if heading:return [{'title':heading[:100],'author':re.split('[·・]',lines[author_row])[0].strip()[:200],'platform':'all','category':'待分类'}]
+    # Explicit field labels work across platforms, languages and page templates.
+    labelled=[];current=None
+    aliases={'菠萝包':'sfacg','SF轻小说':'sfacg','刺猬猫':'ciweimao','起点':'qidian','番茄':'fanqie','ESJ':'esj'}
+    platform=next((value for name,value in aliases.items() if name.casefold() in text.casefold()),'all')
+    for index,line in enumerate(lines):
+        title=re.fullmatch(r'(?:书名|書名|作品名|小说名称|小說名稱|Title)\s*[:：]\s*(.*)',line,re.I)
+        author=re.fullmatch(r'(?:作者|著者|Author)\s*[:：]\s*(.*)',line,re.I)
+        if title:
+            name=title[1].strip() or (lines[index+1] if index+1<len(lines) and not re.search(r'[:：]',lines[index+1]) else '')
+            if name:
+                current={'title':name[:100],'author':'','platform':platform,'category':'待分类'};labelled.append(current)
+        elif author and current:
+            current['author']=(author[1].strip() or (lines[index+1] if index+1<len(lines) and not re.search(r'[:：]',lines[index+1]) else ''))[:200]
+    if labelled:return labelled
     shelf=[];last_author=-1
     if '书架' in text:
         for index,line in enumerate(lines):
@@ -103,23 +143,95 @@ def image_hints(text,context=''):
                 if len(line)<4 or '/' in line or re.match(r'更新|上次|未读|已读|更多|目录|作品简介',line):continue
                 if line in {item['title'] for item in shelf} or not re.search(r'[\u3400-\u9fff]',line):continue
                 shelf.append({'title':line[:100],'author':'','platform':shelf[0]['platform'],'category':'待分类'})
-    return shelf or [image_hint(text)]
+    if shelf:return shelf
+    hint=image_hint(text)
+    if hint['title']:return [hint]
+    # Repeated title/author rows need no site-specific toolbar or vote counters.
+    rows=[]
+    for index,line in enumerate(lines):
+        author=re.fullmatch(r'(?:作者|著者|Author)\s*[:：]\s*(.+)',line,re.I)
+        if author and index:
+            title=lines[index-1].strip('《》')
+            if not re.search(r'简介|目录|书架|首页|返回|登录|注册',title) and not re.search(r'[:：]',title):
+                rows.append({'title':title[:100],'author':author[1][:200],'platform':platform,'category':'待分类'})
+    return rows or [hint]
 
 
-def extract(result, floors,context=''):
+def layout_hints(layout,context=''):
+    """Pair explicit author rows with the closest title in the same column."""
+    hints=[]
+    for row in layout:
+        author=re.fullmatch(r'(?:作者|著者|Author)\s*[:：]\s*(.+)',row['text'].strip(),re.I)
+        if not author:continue
+        x=min(p[0] for p in row['box']);right=max(p[0] for p in row['box']);top=min(p[1] for p in row['box'])
+        height=max(p[1] for p in row['box'])-top
+        candidates=[]
+        for other in layout:
+            bottom=max(p[1] for p in other['box']);left=min(p[0] for p in other['box'])
+            if 0<=top-bottom<=max(100,4*height) and abs(left-x)<=max(35,height*2) and left<right:
+                title=other['text'].strip()
+                if clean_header([title]) and not re.search(r'[:：]|作者|著者|Author|\d.*字',title,re.I):candidates.append((bottom,title))
+        if candidates:
+            title=max(candidates)[1].strip('《》')
+            hints.append({'title':title[:100],'author':author[1][:200],'platform':'all','category':'待分类'})
+    return hints if len(hints)>1 else []
+
+
+def detail_layout_hint(layout,context=''):
+    if not layout:return []
+    text='\n'.join(row['text'] for row in layout)
+    def x(row):return min(p[0] for p in row['box'])
+    def y(row):return min(p[1] for p in row['box'])
+    def h(row):return max(p[1] for p in row['box'])-y(row)
+    width=max(p[0] for row in layout for p in row['box'])
+    platform='qidian' if re.search('出圈指数|正在投资|起点',text+context) else 'fanqie' if re.search('番茄原创|在读人数不足|正在阅读',text) else 'sfacg' if ('点赞' in text and ('月票' in text or '人气' in text)) else ''
+    if not platform:return []
+    if platform=='qidian':anchor=next((row for row in layout[:20] if re.fullmatch(r'[\u3400-\u9fff]+[·・][\u3400-\u9fff]+',row['text'].strip())),None)
+    elif platform=='fanqie':anchor=next((row for row in layout[:20] if re.search('连载|完结',row['text'])),None)
+    else:anchor=next((row for row in layout[:20] if row['text'].strip('|丨｜ ') in GENRES or re.search(r'(连载|完结).*(字|万)',row['text'])),None)
+    if not anchor:return []
+    aligned=[row for row in layout if y(row)<y(anchor) and abs(x(row)-x(anchor))<max(45,h(anchor)) and clean_header([row['text']])]
+    aligned=[row for row in aligned if not re.search(r'书架|中国联通|中国移动|中国电信|作品详情|^返回$',row['text'])]
+    if not aligned:return []
+    author=''
+    if platform=='qidian':
+        if len(aligned)<2:return []
+        author=aligned[-1]['text'].rstrip('>＞著 ').strip();aligned=aligned[:-1]
+    else:
+        after=[row for row in layout if y(row)>y(anchor)+h(anchor) and y(row)<y(anchor)+max(400,h(anchor)*8)]
+        for row in sorted(after,key=y):
+            value=row['text'].strip()
+            outside=x(row)>width*.57 if platform=='sfacg' else abs(x(row)-x(anchor))>max(130,h(anchor)*4)
+            if outside or re.search(r'日更|番茄原创|作家|评分|点评|荣誉|连载|完结|月票|点赞|收藏|人气|^No\.|^VIP$|^签约$|^简介$',value,re.I):continue
+            if not any(c.isalpha() for c in value) or re.search(r'\d.*字',value) or value in ('V','v'):continue
+            author=re.sub(r'^(?:作者|著者)[:：]\s*','',value);break
+        if platform=='fanqie':
+            marker=next((row for row in layout if re.search(r'作家\s*Lv',row['text'],re.I)),None)
+            if marker:
+                nearby=[row for row in layout if abs(y(row)-y(marker))<max(20,h(marker)) and x(row)<x(marker) and clean_header([row['text']])]
+                if nearby:author=max(nearby,key=x)['text']
+    title=''.join(row['text'] for row in sorted(aligned,key=y))
+    category=anchor['text'].split('·')[0] if platform=='qidian' else next((g for g in GENRES if g in anchor['text']),'待分类')
+    return [{'title':title[:100],'author':author[:200],'platform':platform,'category':category}]
+
+
+def extract(result, floors,context='',layouts=None):
     items, skipped, seen = [], [], set()
     for f, floor in enumerate(result):
         for i, text in enumerate(floor['images']):
             source = {'floor_index': f, 'floor': floors[f], 'image_index': i}
-            for hint in image_hints(text,context):
+            boxes=(layouts or {}).get(f'{f}:{i}',{}).get('layout',[])
+            spatial=detail_layout_hint(boxes,context) or layout_hints(boxes,context)
+            for hint in spatial or image_hints(text,context):
                 if not hint['title']:
-                    skipped.append({**source, 'reason': '未识别到书籍标题，可手动添加'})
+                    skipped.append({**source, 'reason': '未识别到文字，可能是插图；可查看原图或重新识别' if not text.strip() else '未提取到书籍标题，请校对文字或使用 LLM 提取'})
                     continue
                 identity = (hint['platform'], providers.normalize(hint['title']), providers.normalize(hint['author']))
                 if identity in seen:continue
                 seen.add(identity)
                 warnings=['书名含省略号，可能被截图截断，请核对完整书名'] if re.search(r'…|\.{3}',hint['title']) else []
-                items.append({**hint, **source, 'state': 'draft', 'candidates': [], 'warnings': warnings})
+                multi=bool(re.search(r'(?m)^\s*(?:我的书架|书架管理|书架)\s*$',text))
+                items.append({**hint, **source, 'multiple_books':multi,'state': 'draft', 'candidates': [], 'warnings': warnings})
     return {'items': items, 'skipped': skipped}
 
 
@@ -148,19 +260,25 @@ def parse_llm(response,result,floors):
     try:
         values = json.loads(response)
         if not isinstance(values,list):raise ValueError()
-        items = []
+        items = [];seen=set()
         for value in values:
             f, i = value['floor_index'], value['image_index']
             if type(f) is not int or type(i) is not int or f < 0 or i < 0:
                 raise ValueError()
             result[f]['images'][i]
-            title = str(value['title']).strip()
+            if not isinstance(value.get('title'),str) or not isinstance(value.get('author',''),str):raise ValueError()
+            title = value['title'].strip()
             if not title:
                 continue
+            identity=(f,i,providers.normalize(title),providers.normalize(value.get('author','')))
+            if identity in seen:continue
+            seen.add(identity)
             items.append({'floor_index': f, 'floor': floors[f], 'image_index': i,
                           'title': title[:100], 'author': str(value.get('author', ''))[:200],
                           'platform': value.get('platform') if value.get('platform') in providers.PLATFORMS else 'all',
-                          'category': str(value.get('category') or '待分类')[:50],
+                          'category': re.split(r'[,，、|/]',str(value.get('category') or '待分类'))[0].strip()[:50] or '待分类',
+                          'title_complete':value.get('title_complete') is not False,
+                          'multiple_books':value.get('multiple_books') is True,
                           'state': 'draft', 'candidates': [], 'warnings': []})
     except (ValueError, TypeError, KeyError, IndexError):
         raise ValueError('模型未返回有效书单，请重试或使用本地提取') from None
@@ -172,6 +290,32 @@ def parse_llm(response,result,floors):
 
 
 def verify(item):
+    result=verify_query(item)
+    if item.get('title_complete') is False:
+        return {**result,'state':'review','book':None,'reason':'截图书名被截断或遮挡，请核对完整书名后确认。'}
+    alternatives=[title for title in item.get('alternative_titles',[]) if title!=item['title']][:3]
+    queries=[{**item,'title':title} for title in alternatives]
+    queries += [{**item,**query} for query in item.get('alternative_queries',[])[:3]]
+    checked=[result]
+    for query in queries:
+        checked.append(verify_query(query))
+    verified={entry['book']['url']:entry for entry in checked if entry['state']=='verified'}
+    if len(verified)==1:return next(iter(verified.values()))
+    if len(verified)>1:
+        return {**result,'state':'review','book':None,'reason':'截图标题有分歧，多个作品均能匹配，请核对原图。'}
+    if item['platform']!='all':
+        verified={}
+        for query in [item,*queries]:
+            try:cross=verify_query({**query,'platform':'all'})
+            except providers.ProviderError as error:
+                result.setdefault('warnings',[]).append('跨平台查询失败：'+str(error));continue
+            if cross['state']=='verified':verified[cross['book']['url']]=cross
+        if len(verified)==1:return next(iter(verified.values()))
+        if len(verified)>1:return {**result,'state':'review','book':None,'reason':'跨平台存在多个匹配作品，请核对原图。'}
+    return result
+
+
+def verify_query(item):
     response = providers.search(item['platform'], item['title'], item['author'])
     candidates = response['items']
     exact = [c for c in candidates if c['match'] == 'exact']

@@ -58,7 +58,7 @@ class ProvidersTest(unittest.TestCase):
         import io
         payload={'code':0,'data':{'ret_data':[{'title':'<em>当器灵</em>的那些年',
           'author':'清风牧月','book_id':'7647153574379539480','abstract':'简介','category':'仙侠'}]}}
-        with patch('urllib.request.urlopen',return_value=io.BytesIO(json.dumps(payload).encode())) as request:
+        with patch('app.providers.urlopen',return_value=io.BytesIO(json.dumps(payload).encode())) as request:
             result=p.search('fanqie','当器灵的那些年','清风牧月',page=2)
             self.assertIn('offset=20',request.call_args.args[0].full_url)
             self.assertNotIn('Cookie',request.call_args.args[0].headers)

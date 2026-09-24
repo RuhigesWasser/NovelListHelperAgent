@@ -27,3 +27,5 @@ projects/windows/
 !/docs/USAGE.md
 /reports/
 /notes/
+
+vendor/

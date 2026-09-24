@@ -107,7 +107,8 @@ class LlmOCR:
             raise ValueError('附加参数不能覆盖模型、消息、图片或流式开关')
         if token_field not in ('max_tokens','max_completion_tokens'):
             raise ValueError('不支持的输出长度字段')
-        self.opener = urllib.request.build_opener(NoRedirect())
+        from direct_http import DirectFirst
+        self.opener = DirectFirst(NoRedirect())
 
     @classmethod
     def from_config(cls, config):
@@ -118,32 +119,33 @@ class LlmOCR:
 
     def payload(self, prompt, png=None, limit=None):
         budget = limit or self.max_tokens
-        encoded = base64.b64encode(png).decode() if png is not None else None
+        images = png if isinstance(png, (list, tuple)) else [png] if png is not None else []
+        encoded_images = [base64.b64encode(image).decode() for image in images]
         if self.protocol == 'chat_completions':
             content = [{'type':'text','text':prompt}]
-            if encoded:
+            for encoded in encoded_images:
                 content.append({'type':'image_url','image_url':{'url':'data:image/png;base64,'+encoded}})
             body = {'model':self.model,'messages':[{'role':'user','content':content}],self.token_field:budget,'stream':self.stream}
         elif self.protocol == 'responses':
             content = [{'type':'input_text','text':prompt}]
-            if encoded:
+            for encoded in encoded_images:
                 content.append({'type':'input_image','image_url':'data:image/png;base64,'+encoded})
             body = {'model':self.model,'input':[{'role':'user','content':content}],'max_output_tokens':budget,'stream':self.stream}
         elif self.protocol == 'anthropic':
             content = []
-            if encoded:
+            for encoded in encoded_images:
                 content.append({'type':'image','source':{'type':'base64','media_type':'image/png','data':encoded}})
             content.append({'type':'text','text':prompt})
             body = {'model':self.model,'messages':[{'role':'user','content':content}],'max_tokens':budget,'stream':self.stream}
         elif self.protocol == 'gemini':
             parts = [{'text':prompt}]
-            if encoded:
+            for encoded in encoded_images:
                 parts.append({'inline_data':{'mime_type':'image/png','data':encoded}})
             body = {'contents':[{'role':'user','parts':parts}],'generationConfig':{'maxOutputTokens':budget}}
         else:
             message = {'role':'user','content':prompt}
-            if encoded:
-                message['images'] = [encoded]
+            if encoded_images:
+                message['images'] = encoded_images
             body = {'model':self.model,'messages':[message],'options':{'num_predict':budget},'stream':self.stream}
         for key, value in self.extra_body.items():
             if isinstance(value, dict) and isinstance(body.get(key), dict):

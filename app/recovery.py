@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import urllib.request
+from app.paths import replace_file
 
 
 DEFAULTS={'mode':'off','max_calls':3,'max_tokens':32768}
@@ -14,7 +15,7 @@ DEFAULTS={'mode':'off','max_calls':3,'max_tokens':32768}
 def write_json(path,data):
     temporary=path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
-    temporary.replace(path)
+    replace_file(temporary,path)
 
 
 def settings(local):
@@ -91,13 +92,9 @@ class Recovery:
         verified=self.config.get('verification',{})
         if not verified.get('ok') or verified.get('fingerprint')!=fingerprint(self.config):
             self.record('reocr','skipped','当前模型配置尚未验证图片能力，请在设置中重新启用识图兜底');return None
-        from PIL import Image,ImageOps
-        import io
-        with Image.open(path) as source:
-            image=ImageOps.exif_transpose(source).convert('RGB')
-            image.thumbnail((1800,3000))
-            buffer=io.BytesIO();image.save(buffer,format='PNG')
-        text=self.ask('reocr','逐字转写图片中可见文字，保留换行，只返回文字。没有文字则返回 __NO_TEXT__。',buffer.getvalue())
+        from app.image_books import image_parts
+        parts=image_parts(path)
+        text=self.ask('reocr','逐字转写图片中可见文字，保留换行，只返回文字。附图是同一原图的放大部分，不要重复转写；仔细核对书名和作者的细小字。忽略覆盖其上的水印。没有文字则返回 __NO_TEXT__。',parts[0] if len(parts)==1 else parts)
         if text is not None:
             self.record('reocr','succeeded','指定图片已重新识别')
             return '' if text.strip()=='__NO_TEXT__' else text
@@ -136,7 +133,9 @@ class Recovery:
                 if not isinstance(title,str) or not 0<len(title)<=100 or not isinstance(author,str) or len(author)>200 or platform not in (*providers.PLATFORMS,'all'):raise ValueError()
                 # A newly supplied author must be present in the original material.
                 if author!=item.get('author','') and providers.normalize(author) not in providers.normalize(ocr_text):raise ValueError()
-                if item.get('platform')!='all' and platform!=item['platform']:raise ValueError()
+                if item.get('platform')!='all' and platform not in (item['platform'],'all'):
+                    markers={'sfacg':('菠萝包','SF轻小说'),'fanqie':('番茄',),'qidian':('起点',),'ciweimao':('刺猬猫',),'esj':('esjzone','ESJ')}
+                    if not any(marker.casefold() in ocr_text.casefold() for marker in markers[platform]):raise ValueError()
                 from difflib import SequenceMatcher
                 if SequenceMatcher(None,providers.normalize(item['title']),providers.normalize(title)).ratio()<.6:raise ValueError()
             except (ValueError,KeyError,TypeError,AttributeError):
@@ -156,7 +155,7 @@ class Recovery:
         return last
 
 
-def recognize_images(raw,engine,folder,recovery):
+def recognize_images(raw,engine,folder,recovery,allow_vision=True):
     """Persist each success before proceeding; a failed image does not erase others."""
     folder=Path(folder);path=folder/'ocr-progress.json'
     saved=json.loads(path.read_text(encoding='utf8')) if path.exists() else {'images':{}}
@@ -170,12 +169,19 @@ def recognize_images(raw,engine,folder,recovery):
             digest=''
             try:
                 digest=hashlib.sha256(filename.read_bytes()).hexdigest()
-                text=by_hash[digest] if digest in by_hash else engine(filename)
+                cached=digest in by_hash
+                prior=next((entry for entry in saved['images'].values() if entry.get('hash')==digest and isinstance(entry.get('layout'),list)),{})
+                text=by_hash[digest] if cached else engine(filename)
+                if allow_vision and not text.strip() and recovery.options['mode']=='vision':
+                    improved=recovery.read_image(filename)
+                    if improved is not None:text=improved
                 by_hash[digest]=text
                 saved['images'][key]={'hash':digest,'state':'succeeded','text':text}
+                layout=prior.get('layout') if cached else getattr(engine,'last_layout',None)
+                if isinstance(layout,list):saved['images'][key]['layout']=layout
             except Exception as error:
                 text=None
-                if filename.exists():
+                if allow_vision and filename.exists():
                     try:text=recovery.read_image(filename)
                     except Exception as fallback_error:recovery.record('reocr','failed',str(fallback_error))
                 if text is None:

@@ -8,6 +8,16 @@ if [[ ${1:-} == --no-browser ]]; then no_browser=true; shift; fi
 [[ $# == 0 ]] || { echo 'Unexpected launcher argument.' >&2; exit 1; }
 case "$app_root" in ''|/) echo 'Invalid application directory.' >&2; exit 1;; esac
 case "$mode" in start|setup|stop|clean|login) ;; *) echo 'Expected start, setup, stop, clean or login.' >&2; exit 1;; esac
+package_index='https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple'
+package_fallback='https://pypi.org/simple'
+python_mirror=''
+uv_release_mirror='https://github.com/astral-sh/uv/releases/download'
+if [[ -f "$app_root/download-sources.conf" ]]; then
+  while IFS='=' read -r key value; do
+    value=${value%$'\r'}
+    case "$key" in PACKAGE_INDEX) package_index=$value;; PACKAGE_FALLBACK) package_fallback=$value;; PYTHON_MIRROR) python_mirror=$value;; UV_RELEASE_MIRROR) if [[ -n "$value" ]]; then uv_release_mirror=$value; fi;; esac
+  done < "$app_root/download-sources.conf"
+fi
 system=$(uname -s)
 arch=$(uname -m)
 case "$system:$arch" in
@@ -71,7 +81,7 @@ expected=$(printf '%s\n%s' "$app_root" "$fingerprint")
 needs_setup=true
 if [[ -x "$python" && -f "$ready" && $(cat "$ready") == "$expected" ]]; then needs_setup=false; fi
 if $needs_setup; then
-  printf 'Install/update private Python 3.12 and packages inside %s?\nDownloads: Astral GitHub releases and PyPI. No sudo, global Python, shell profile or PATH changes.\nAllow local installation? [y/N] ' "$runtime"
+  printf 'Install/update private Python 3.12 and packages inside %s?\nBundled runtime is preferred; package sources are set in download-sources.conf. No sudo, global Python, shell profile or PATH changes.\nAllow local installation? [y/N] ' "$runtime"
   IFS= read -r answer || answer=''
   case "$answer" in y|Y|yes|YES) ;; *) echo 'Cancelled. Nothing installed.'; exit 0;; esac
 fi
@@ -88,19 +98,42 @@ export PIP_CACHE_DIR="$runtime/cache/pip" XDG_CACHE_HOME="$runtime/cache" XDG_CO
 export XDG_DATA_HOME="$local_dir/data" HF_HOME="$runtime/cache/huggingface" MPLCONFIGDIR="$runtime/cache/matplotlib"
 if $needs_setup; then
   uv="$platform_dir/uv/uv"
+  if [[ -x "$app_root/vendor/uv/uv" ]]; then uv="$app_root/vendor/uv/uv"; fi
   if [[ ! -x "$uv" ]]; then
     archive="$platform_dir/uv.tar.gz"
-    curl --disable --fail --location --retry 2 "https://github.com/astral-sh/uv/releases/download/0.12.17/uv-$target.tar.gz" --output "$archive"
+    url="${uv_release_mirror%/}/0.12.17/uv-$target.tar.gz"
+    curl --disable --fail --location --retry 2 --noproxy '*' "$url" --output "$archive" || curl --disable --fail --location --retry 2 "$url" --output "$archive"
     [[ $(file_hash "$archive") == "$digest" ]] || { echo 'uv checksum mismatch.' >&2; exit 1; }
     mkdir -p "$platform_dir/uv"
     tar -xzf "$archive" --strip-components=1 -C "$platform_dir/uv"
     rm -f -- "$archive"
   fi
-  if [[ -f "$ready" && $(head -n 1 "$ready") != "$app_root" ]]; then rm -rf -- "$platform_dir/venv"; fi
+  if [[ -x "$python" ]] && "$python" -B "$app_root/scripts/app_control.py" status >/dev/null 2>&1; then echo "Stop the application before updating its environment." >&2; exit 1; fi
+  if [[ -d "$platform_dir/venv" ]]; then rm -rf -- "$platform_dir/venv"; fi
   cd "$app_root"
-  "$uv" sync --locked --no-dev --managed-python --python 3.12
-  if ! "$python" -B -c 'import cv2, onnxruntime, aiotieba, app.server'; then
-    echo 'Runtime import failed. On minimal Linux, check libGL and glib system libraries. See docs/POSIX.md.' >&2; exit 1
+  if [[ -n "$python_mirror" ]]; then export UV_PYTHON_INSTALL_MIRROR="$python_mirror"; fi
+  if [[ -x "$app_root/vendor/python/bin/python3" ]]; then
+    export UV_PYTHON="$app_root/vendor/python/bin/python3" UV_PYTHON_DOWNLOADS=never
+    "$uv" venv --python "$UV_PYTHON" "$platform_dir/venv"
+  else
+    "$uv" venv --managed-python --python 3.12 "$platform_dir/venv"
+  fi
+  requirements="$platform_dir/requirements.lock.txt"
+  "$uv" export --locked --no-dev --no-emit-project --format requirements-txt --output-file "$requirements" --quiet >/dev/null
+  installed=false
+  for index in "$package_index" "$package_fallback"; do
+    [[ -n "$index" ]] || continue
+    echo "Installing locked packages from: $index"
+    if (unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; export NO_PROXY='*' no_proxy='*'; "$uv" pip sync --python "$python" --require-hashes --only-binary :all: --index-url "$index" "$requirements"); then installed=true; break; fi
+    if [[ -n ${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}${http_proxy:-}${https_proxy:-}${all_proxy:-} ]]; then
+      if "$uv" pip sync --python "$python" --require-hashes --only-binary :all: --index-url "$index" "$requirements"; then installed=true; break; fi
+    fi
+  done
+  $installed || { echo 'Dependency setup failed. Check download-sources.conf.' >&2; exit 1; }
+  check_code='import cv2, onnxruntime, aiotieba'
+  if [[ -f "$app_root/app/server.py" ]]; then check_code+='; import app.server'; fi
+  if ! "$python" -B -c "$check_code"; then
+    echo 'Runtime import failed. On minimal Linux, check libGL and glib system libraries. See docs/USAGE.md.' >&2; exit 1
   fi
   printf '%s\n' "$expected" > "$ready"
 fi

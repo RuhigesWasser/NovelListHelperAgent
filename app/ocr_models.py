@@ -1,3 +1,6 @@
+from app.paths import add_tools
+add_tools()
+from direct_http import urlopen
 """Opt-in language assets. Model URLs and digests are from RapidAI's v3.9.2 manifest."""
 import hashlib
 import os
@@ -55,7 +58,7 @@ def install(language, confirmed=False):
         temp_path = None
         try:
             request = urllib.request.Request(BASE+entry['file'], headers={'User-Agent':'NovelListHelperAgent/0.2'})
-            with urllib.request.urlopen(request, timeout=60) as response, tempfile.NamedTemporaryFile(dir=DIRECTORY, suffix='.part', delete=False) as target:
+            with urlopen(request, timeout=60) as response, tempfile.NamedTemporaryFile(dir=DIRECTORY, suffix='.part', delete=False) as target:
                 temp_path = Path(target.name)
                 size = 0
                 for chunk in iter(lambda: response.read(1024*1024), b''):

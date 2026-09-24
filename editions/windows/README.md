@@ -13,7 +13,9 @@ Windows x64 桌面应用，在独立窗口中使用本地小说书单工具。
 
 产物为 `dist/Shiye-Windows-x64.zip`。完整解压后双击 `Shiye.exe`，不要只拷贝 exe。构建目录和输出目录可通过 BuildDirectory、OutputDirectory 参数指定。
 
-默认构建包含 .NET 运行时；使用机器需要 WebView2 Runtime。首次使用时会询问是否下载目录内 Python 环境。也可以运行 `Start.cmd` 使用浏览器界面。
+默认程序包包含 .NET 运行时，以及 `vendor` 中的 Python 和 uv。首次使用经确认后，将锁定版本的依赖安装到 `.runtime`；默认使用清华 PyPI 镜像，失败后尝试 PyPI 官方源。项目代码、界面、脚本全部在包内，不需要 Git 或从项目仓库补下载。桌面窗口需要 WebView2 Runtime；也可运行 `Start.cmd` 使用浏览器界面。
+
+下载源可在 `download-sources.conf` 中修改，只影响本应用。源码包不含 `vendor`，从源码准备 Python 时可通过 `PYTHON_MIRROR` 指定 python-build-standalone 镜像。
 
 ## 数据
 
