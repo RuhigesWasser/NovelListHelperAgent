@@ -18,3 +18,11 @@ async function loadRecoveryLog(id){
   for(const event of data.recovery.events)target.append(node('p',`${actions[event.action]||event.action}：${event.message}`,'help'));
 }
 loadRecoverySettings().catch(e=>notice(e.message,true));
+
+organizeSettingsReady=json('/api/organize/settings').then(data=>{$('#auto-multi-book').checked=data.auto_multi_book;});
+organizeSettingsReady.catch(error=>notice(error.message,true));
+$('#auto-multi-book').onchange=()=>{
+  const control=$('#auto-multi-book'),chosen=control.checked;control.disabled=true;
+  organizeSettingsReady=post('/api/organize/settings',{auto_multi_book:chosen}).catch(error=>{control.checked=!chosen;throw error;}).finally(()=>{control.disabled=false;});
+  organizeSettingsReady.catch(error=>notice(error.message,true));
+};

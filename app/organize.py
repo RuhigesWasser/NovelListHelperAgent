@@ -7,6 +7,19 @@ from app import providers
 GENRES = ('校园', '科幻', '魔幻', '都市', '玄幻', '古风', '游戏', '悬疑', '同人', '仙侠')
 
 
+def apply_multi_policy(plan,automatic=False):
+    groups={}
+    for item in plan['items']:groups.setdefault((item['floor_index'],item['image_index']),[]).append(item)
+    for items in groups.values():
+        for item in items:
+            if automatic or (len(items)<2 and not any(entry.get('multiple_books') for entry in items)):
+                item.pop('manual_selection_required',None)
+            elif item['state'] not in ('archived','confirmed') and not item.get('user_selected'):
+                item.update(state='review',manual_selection_required=True,
+                            reason='此图包含多本书，自动处理一图多书已关闭。请选择要整理的书籍。')
+    return plan
+
+
 def clean_header(lines):
     return [s for s in lines if s and any(c.isalpha() for c in s)
             and s not in ('VIP','返回','首页','详情','作品详情','SF轻小说','菠萝包','起点读书','刺猬猫','番茄小说')
@@ -217,7 +230,8 @@ def extract(result, floors,context='',layouts=None):
                 if identity in seen:continue
                 seen.add(identity)
                 warnings=['书名含省略号，可能被截图截断，请核对完整书名'] if re.search(r'…|\.{3}',hint['title']) else []
-                items.append({**hint, **source, 'state': 'draft', 'candidates': [], 'warnings': warnings})
+                multi=bool(re.search(r'(?m)^\s*(?:我的书架|书架管理|书架)\s*$',text))
+                items.append({**hint, **source, 'multiple_books':multi,'state': 'draft', 'candidates': [], 'warnings': warnings})
     return {'items': items, 'skipped': skipped}
 
 
@@ -264,6 +278,7 @@ def parse_llm(response,result,floors):
                           'platform': value.get('platform') if value.get('platform') in providers.PLATFORMS else 'all',
                           'category': re.split(r'[,，、|/]',str(value.get('category') or '待分类'))[0].strip()[:50] or '待分类',
                           'title_complete':value.get('title_complete') is not False,
+                          'multiple_books':value.get('multiple_books') is True,
                           'state': 'draft', 'candidates': [], 'warnings': []})
     except (ValueError, TypeError, KeyError, IndexError):
         raise ValueError('模型未返回有效书单，请重试或使用本地提取') from None

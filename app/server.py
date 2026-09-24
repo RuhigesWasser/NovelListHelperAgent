@@ -18,7 +18,7 @@ from app import library
 from app import covers
 from app.library import Book,component,LibraryError
 from app.jobs import Jobs, active_pipeline
-from app.paths import ROOT, add_tools
+from app.paths import ROOT, add_tools, replace_file
 from app import providers, ocr_models, organize, chapters
 from app.llm_settings import LlmSettings
 from app.esj_session import ESJSession, ESJError
@@ -89,6 +89,10 @@ class ESJLogin(BaseModel):
 
 class Extraction(BaseModel):
     method: Literal['local', 'llm', 'vision'] = 'local'
+
+
+class OrganizeSettings(BaseModel):
+    auto_multi_book: bool = False
 
 
 class RecoverySettings(BaseModel):
@@ -165,7 +169,17 @@ def create_app(local, token, shutdown=lambda: None):
     app.state.esj_settings = esj_settings
 
     def model_config():
-        return {**llm_settings.current(),'recovery':recovery_tools.settings(local)}
+        return {**llm_settings.current(),'recovery':recovery_tools.settings(local),**organize_settings()}
+
+    @app.get('/api/organize/settings')
+    def organize_settings():
+        path=local/'organize-settings.json'
+        return OrganizeSettings(**(json.loads(path.read_text(encoding='utf8')) if path.exists() else {})).model_dump()
+
+    @app.post('/api/organize/settings')
+    def save_organize_settings(value: OrganizeSettings):
+        recovery_tools.write_json(local/'organize-settings.json',value.model_dump())
+        return value.model_dump()
 
     @app.get('/api/recovery/settings')
     def recovery_settings():
@@ -507,7 +521,7 @@ def create_app(local, token, shutdown=lambda: None):
     def write_plan(path, data):
         temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-        temporary.replace(path)
+        replace_file(temporary,path)
 
     @app.get('/api/jobs/{job_id}/books')
     def read_plan(job_id: str):
@@ -533,20 +547,25 @@ def create_app(local, token, shutdown=lambda: None):
         else:
             raw=json.loads((path.parent/'raw.json').read_text(encoding='utf8'))
             progress=path.parent/'ocr-progress.json'
-            layouts=json.loads(progress.read_text(encoding='utf8')).get('images',{}) if progress.exists() else {}
+            ocr_progress=json.loads(progress.read_text(encoding='utf8')).get('images',{}) if progress.exists() else {}
+            layouts=ocr_progress
             layouts={key:entry for key,entry in layouts.items() if entry.get('text')==data['result'][int(key.split(':')[0])]['images'][int(key.split(':')[1])]}
             plan = organize.extract(data['result'], data['floors'],raw.get('title',''),layouts)
-        plan=enrich_plan(job_id,plan,method,config)
+            for skipped in plan['skipped']:
+                failed=ocr_progress.get(f"{skipped['floor_index']}:{skipped['image_index']}",{})
+                if failed.get('state')=='failed':skipped['reason']='OCR 失败：'+failed.get('error','无法识别图片')
+        if method=='vision':plan=enrich_plan(job_id,plan,method,config)
         with book_lock:
             previous=read_plan(job_id)
             preserved=[item for item in previous['items'] if item['state'] in ('archived','confirmed','verified') or item.get('user_edited')]
             for item in preserved:
                 plan['items']=[fresh for fresh in plan['items'] if not (fresh['floor_index']==item['floor_index'] and fresh['image_index']==item['image_index'] and providers.normalize(fresh['title'])==providers.normalize(item['title']))]
             plan['items']=preserved+plan['items']
+            organize.apply_multi_policy(plan,config.get('auto_multi_book',False))
             write_plan(path, plan)
         return read_plan(job_id)
 
-    def enrich_plan(job_id,plan,method,config):
+    def enrich_plan(job_id,plan,method,config,targets=None):
         if method!='vision' and config.get('recovery',{}).get('mode') not in ('vision','text'):return plan
         from app import image_books
         folder=local/'jobs'/job_id
@@ -555,7 +574,7 @@ def create_app(local, token, shutdown=lambda: None):
             config=llm_config('llm');client=LlmOCR.from_config(config)
         else:client=None
         recovery=recovery_tools.Recovery(folder,config,lambda:jobs.check_pipeline(job_id) if active_pipeline.get()==job_id else None)
-        return image_books.augment(plan,data['result'],data['floors'],raw,folder,recovery,client)
+        return image_books.augment(plan,data['result'],data['floors'],raw,folder,recovery,client,targets=targets)
 
     @app.post('/api/jobs/{job_id}/books/{item_id}/verify')
     def verify_book(job_id: str, item_id: int, value: ProposalChoice):
@@ -565,6 +584,7 @@ def create_app(local, token, shutdown=lambda: None):
         if value.floor_index >= len(data['floors']) or value.image_index >= data['images'][value.floor_index]:
             raise HTTPException(400, '请选择有效图片来源')
         item = value.model_dump(exclude={'url'})
+        item['user_selected']=True
         item.update({key:edited[key] for key in ('user_edited','extraction','alternative_titles','alternative_queries','title_complete') if key in edited})
         item['floor'] = data['floors'][value.floor_index]
         try:
@@ -625,6 +645,7 @@ def create_app(local, token, shutdown=lambda: None):
             for item in plan['items']:
                 if item['state'] not in ('verified', 'confirmed'):
                     continue
+                if item.get('manual_selection_required') and not item.get('user_selected'):continue
                 book = item['book']
                 try:
                     if active_pipeline.get() == job_id:
@@ -655,46 +676,57 @@ def create_app(local, token, shutdown=lambda: None):
 
     def run_workflow(job_id, method, config):
         with esj_session.scope():
-            plan = read_plan(job_id)
-            if not plan['items']:
-                plan = extract_plan(job_id,method,config)
-            else:
-                plan=enrich_plan(job_id,plan,method,config)
-                with book_lock:write_plan(plan_path(job_id),plan)
+            plan=read_plan(job_id)
+            if not plan['items']:plan=extract_plan(job_id,method,config)
+            organize.apply_multi_policy(plan,config.get('auto_multi_book',False))
             recovery=recovery_tools.Recovery(local/'jobs'/job_id,config,lambda:jobs.check_pipeline(job_id))
-            ocr_result=result(job_id)['result']
-            raw=json.loads((local/'jobs'/job_id/'raw.json').read_text(encoding='utf8'))
-            for index, item in enumerate(plan['items']):
-                jobs.check_pipeline(job_id)
-                if item['state'] in ('archived','verified','confirmed'):
-                    continue
-                jobs.pipeline_status(job_id,'running',f'核对书籍 {index+1}/{len(plan["items"])}')
-                try:
-                    verified=recovery.lookup(item,lambda proposal:verify_book(job_id,index,ProposalChoice(**proposal)))
-                    if verified['state']=='review' and config.get('recovery',{}).get('mode','off')!='off':
-                        source=ocr_result[item['floor_index']]['images'][item['image_index']]
-                        image_path=contained(local/'jobs'/job_id,raw['floors'][item['floor_index']]['images'][item['image_index']]['file'])
-                        fixed=recovery.verify_book(verified,source,organize.verify,image_path)
-                        jobs.check_pipeline(job_id)
-                        with book_lock:
-                            latest=read_plan(job_id);latest['items'][index]=fixed
-                            write_plan(plan_path(job_id),latest)
-                except (providers.ProviderError,HTTPException,ValueError) as exc:
-                    reason = str(exc.detail) if isinstance(exc,HTTPException) else str(exc)
-                    if config.get('key'):
-                        reason = reason.replace(config['key'],'[已隐藏]')
-                    with book_lock:
-                        latest = read_plan(job_id)
-                        latest['items'][index].update(state='review',reason=reason,error=reason)
-                        write_plan(plan_path(job_id),latest)
+            def check_items(stage):
+                for index,item in enumerate(plan['items']):
+                    jobs.check_pipeline(job_id)
+                    if item['state'] in ('archived','verified','confirmed'):continue
+                    if item.get('manual_selection_required'):continue
+                    jobs.pipeline_status(job_id,'running',f'{stage} {index+1}/{len(plan["items"])}')
+                    try:plan['items'][index]=recovery.lookup(item,organize.verify)
+                    except (providers.ProviderError,ValueError) as error:
+                        plan['items'][index]={**item,'state':'review','reason':recovery.clean(error)}
+                    with book_lock:write_plan(plan_path(job_id),plan)
+            check_items('核对 OCR 结果')
+            targets={(item['floor_index'],item['image_index']) for item in plan['items'] if item['state']=='review' and not item.get('manual_selection_required')}
+            manual_sources={(item['floor_index'],item['image_index']) for item in plan['items'] if item.get('manual_selection_required')}
+            targets.update((item['floor_index'],item['image_index']) for item in plan.get('skipped',[]) if (item['floor_index'],item['image_index']) not in manual_sources)
+            mode=config.get('recovery',{}).get('mode','off')
+            configured=bool(config.get('base_url') and config.get('model'))
+            if targets and mode=='vision' and configured and method!='vision':
+                jobs.pipeline_status(job_id,'running',f'多模态兜底：处理 {len(targets)} 张未通过的图片')
+                plan=enrich_plan(job_id,plan,'local',config,targets)
+                organize.apply_multi_policy(plan,config.get('auto_multi_book',False))
+                with book_lock:write_plan(plan_path(job_id),plan)
+                check_items('核对多模态结果')
+            elif targets and mode=='text' and configured:
+                ocr_result=result(job_id)['result']
+                for index,item in enumerate(plan['items']):
+                    if item['state']!='review':continue
+                    if item.get('manual_selection_required'):continue
+                    source=ocr_result[item['floor_index']]['images'][item['image_index']]
+                    plan['items'][index]=recovery.verify_book(item,source,organize.verify)
+                with book_lock:write_plan(plan_path(job_id),plan)
             jobs.check_pipeline(job_id)
-            jobs.pipeline_status(job_id,'running','归档书籍')
-            plan = archive_plan(job_id)
-            count = sum(i['state']=='archived' for i in plan['items'])
-            pending = len(plan['items'])-count
-            skipped = len(plan.get('skipped',[]))
-            state = 'review' if pending or skipped else 'succeeded'
-            return state,f'归档 {count} 本，待核对 {pending} 本，未提取图片 {skipped} 张'
+            with book_lock:write_plan(plan_path(job_id),plan)
+            jobs.pipeline_status(job_id,'running','归档已确认书籍')
+            plan=archive_plan(job_id)
+            count=sum(item['state']=='archived' for item in plan['items'])
+            pending=len(plan['items'])-count;skipped=len(plan.get('skipped',[]))
+            if pending or skipped:
+                plan['review_notice']='以下内容未能自动确认，请核对原图、编辑资料或选择候选。模糊匹配不会自动归档。'
+                unresolved=skipped or any(item['state']!='archived' and not item.get('manual_selection_required') for item in plan['items'])
+                if any(item.get('manual_selection_required') for item in plan['items']):plan['review_notice']='一图多书的自动处理已关闭，请逐本选择要整理的书籍。'+plan['review_notice']
+                if unresolved and (mode!='vision' or not configured):
+                    plan['review_notice']+='可在设置中配置多模态 LLM，并启用多模态兜底后重试。'
+                elif unresolved:plan['review_notice']+='多模态处理后仍未通过的原因保留在各项中。'
+            else:plan.pop('review_notice',None)
+            with book_lock:write_plan(plan_path(job_id),plan)
+            state='review' if pending or skipped else 'succeeded'
+            return state,f'归档 {count} 本，待处理 {pending} 本，未提取图片 {skipped} 张'
 
     jobs.pipeline = run_workflow
 

@@ -21,7 +21,9 @@ for(const id of ['#upload','#upload-folder'])$(id).addEventListener('change',()=
 $('#engine').addEventListener('change',()=>$('#engine-help').textContent=$('#engine').value==='builtin'?'OCR 在本机运行；启用 LLM 提取或多模态兜底时，会按设置发送文字或图片。':'图片将发送到你配置的 API 服务，可能产生调用费用。');
 function asBase64(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(file);});}
 let failedBatch=[];
+let organizeSettingsReady=Promise.resolve();
 async function submitBatch(items){
+  try{await organizeSettingsReady;}catch(error){notice(error.message,true);return;}
   const button=$('#submit-task');button.disabled=true;failedBatch=[];
   const progress=$('#batch-progress');progress.replaceChildren();let count=0;
   const engine=$('#engine').value,language=$('#ocr-language').value,auto_mode=$('#auto-mode').value;

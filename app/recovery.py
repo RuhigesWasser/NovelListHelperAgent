@@ -155,7 +155,7 @@ class Recovery:
         return last
 
 
-def recognize_images(raw,engine,folder,recovery):
+def recognize_images(raw,engine,folder,recovery,allow_vision=True):
     """Persist each success before proceeding; a failed image does not erase others."""
     folder=Path(folder);path=folder/'ocr-progress.json'
     saved=json.loads(path.read_text(encoding='utf8')) if path.exists() else {'images':{}}
@@ -172,7 +172,7 @@ def recognize_images(raw,engine,folder,recovery):
                 cached=digest in by_hash
                 prior=next((entry for entry in saved['images'].values() if entry.get('hash')==digest and isinstance(entry.get('layout'),list)),{})
                 text=by_hash[digest] if cached else engine(filename)
-                if not text.strip() and recovery.options['mode']=='vision':
+                if allow_vision and not text.strip() and recovery.options['mode']=='vision':
                     improved=recovery.read_image(filename)
                     if improved is not None:text=improved
                 by_hash[digest]=text
@@ -181,7 +181,7 @@ def recognize_images(raw,engine,folder,recovery):
                 if isinstance(layout,list):saved['images'][key]['layout']=layout
             except Exception as error:
                 text=None
-                if filename.exists():
+                if allow_vision and filename.exists():
                     try:text=recovery.read_image(filename)
                     except Exception as fallback_error:recovery.record('reocr','failed',str(fallback_error))
                 if text is None:

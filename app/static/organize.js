@@ -15,7 +15,10 @@ function draftValue(item){return Object.fromEntries(['title','author','platform'
 function renderPlan(){
   const target=$('#proposals');target.replaceChildren();
   $('#organize-status').textContent=`${plan.items.length} 本 · ${plan.items.filter(i=>i.state==='archived').length} 本已归档`;
-  for(const [index,item]of plan.items.entries()){
+  if(pipelineBusy){target.append(node('p','正在自动处理，完成后会显示需要你核对的内容。','help'));target.closest('#organizer').querySelectorAll('button,input,select').forEach(n=>n.disabled=true);return;}
+  if(plan.review_notice)target.append(node('p',plan.review_notice,'detail-error'));
+  const ordered=[...plan.items.entries()].sort((a,b)=>Number(a[1].state==='archived')-Number(b[1].state==='archived'));
+  for(const [index,item]of ordered){
     const row=node('section',undefined,'proposal'),fields=node('div',undefined,'form-grid');
     row.append(node('h3',`楼层 ${item.floor} · 图片 ${item.image_index+1} · ${planStates[item.state]}`));
     row.append(sourceLink(item));
@@ -26,11 +29,12 @@ function renderPlan(){
     const wrap=node('label','平台'),select=node('select');
     for(const [value,label]of [['all','全部平台'],['qidian','起点中文网'],['ciweimao','刺猬猫'],['sfacg','菠萝包'],['fanqie','番茄小说'],['esj','ESJ Zone']]){const o=node('option',label);o.value=value;select.append(o);}
     select.value=item.platform;select.onchange=()=>{item.platform=select.value;item.dirty=true;item.state='draft';};wrap.append(select);fields.append(wrap);row.append(fields);
-    const actions=node('div',undefined,'actions'),save=node('button','保存修改','quiet'),verify=node('button','查询核对','secondary');
+    const actions=node('div',undefined,'actions'),save=node('button','保存修改','quiet'),verify=node('button',item.manual_selection_required?'选择并核对':'查询核对','secondary');
     save.onclick=()=>planAction(async()=>{plan.items[index]=await json(`/api/jobs/${planJob}/books/${index}`,{method:'PUT',body:JSON.stringify(draftValue(item))});});
     verify.onclick=()=>planAction(()=>verifyItem(index));actions.append(save,verify);row.append(actions);
     for(const warning of item.warnings||[])if(!item.reason?.includes(warning))row.append(node('p',warning,'help'));
     if(item.error||item.archive_error||item.reason)row.append(node('p',item.error||item.archive_error||item.reason,'help'));
+    if(item.fallback_error)row.append(node('p','多模态兜底：'+item.fallback_error,'help'));
     if(item.book)row.append(node('p',`${item.book.title} / ${item.book.author} · ${item.book.platform_label}`,'help'));
     const candidates=node('details');candidates.append(node('summary',`候选（${(item.candidates||[]).length}）`));
     candidates.open=item.state==='review';
@@ -67,6 +71,7 @@ $('#extract-books').onclick=()=>planAction(async()=>{
 $('#verify-books').onclick=()=>planAction(async()=>{
   let failures=0;
   for(let i=0;i<plan.items.length;i++){
+    if(plan.items[i].manual_selection_required)continue;
     if(['archived','confirmed','verified'].includes(plan.items[i].state)&&!plan.items[i].dirty)continue;
     $('#organize-status').textContent=`正在核对 ${i+1} / ${plan.items.length}`;
     try{await verifyItem(i);}catch{failures++;}

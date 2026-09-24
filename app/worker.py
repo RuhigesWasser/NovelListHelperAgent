@@ -30,11 +30,11 @@ def main():
         try:
             engine = ocr.BuiltinOCR(spec.get('language', 'zh')) if spec['engine'] == 'builtin' else ocr.LlmOCR.from_config(spec)
         except Exception as error:
-            if recovery.options['mode']!='vision':raise
+            if recovery.options['mode']!='vision' and spec.get('auto_mode','off')=='off':raise
             message=str(error)
-            recovery.record('reocr','running','识别引擎未能启动，尝试已配置的多模态兜底')
+            recovery.record('reocr','running','识别引擎未能启动，保留原图供后续处理')
             def engine(path):raise RuntimeError(message)
-        failures=recognize_images(raw,engine,folder,recovery)
+        failures=recognize_images(raw,engine,folder,recovery,allow_vision=spec.get('auto_mode','off')=='off')
         if failures:
             (folder/'error.txt').write_text(f'{failures} 张图片识别失败；其余图片已保存，可恢复失败项。',encoding='utf8')
             return 2

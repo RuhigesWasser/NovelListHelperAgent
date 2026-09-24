@@ -99,11 +99,20 @@ class ImageBookRoutesTests(unittest.TestCase):
         Image.new('RGB',(30,50),'white').save(folder/'input.png')
         (folder/'result.json').write_text(json.dumps([{'text':'','images':['无法通过规则识别的截图']}]),encoding='utf8')
         (self.local/'recovery-settings.json').write_text('{"mode":"vision"}')
-        config={'base_url':'https://example.test','model':'vision'}
+        config={'base_url':'https://example.test','model':'vision','recovery':{'mode':'vision'}}
         config['verification']={'ok':True,'fingerprint':fingerprint(config)}
         with patch('app.llm_settings.LlmSettings.current',return_value=config),patch('app.recovery.Recovery.ask',return_value='[{"title":"模型读到的书","author":"作者"}]') as ask:
             response=self.post(route+'/extract',{'method':'local'})
             self.assertEqual(response.status_code,200,response.text)
-            self.assertEqual(response.json()['items'][0]['extraction'],'vision')
-            self.assertEqual(response.json()['skipped'],[])
+            self.assertEqual(response.json()['items'],[])
+            self.assertEqual(ask.call_count,0)
+            with patch('app.organize.verify',side_effect=lambda item:{**item,'state':'review','reason':'需要选择候选'}):
+                from app.jobs import active_pipeline
+                token=active_pipeline.set(job_id)
+                try:state,stage=self.app.state.jobs.pipeline(job_id,'local',config)
+                finally:active_pipeline.reset(token)
+            result=self.client.get(route,headers=self.headers).json()
+            self.assertEqual(result['items'][0]['extraction'],'vision')
+            self.assertEqual(result['skipped'],[])
             self.assertEqual(ask.call_count,1)
+            self.assertEqual(state,'review')
