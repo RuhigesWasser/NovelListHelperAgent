@@ -6,7 +6,7 @@ namespace ShiyeDesktop;
 internal sealed class StartupView : UserControl
 {
     static readonly Color Accent = Color.FromArgb(34, 34, 34);
-    readonly Panel card = new Surface();
+    readonly Surface card = new();
     readonly Label logo = new() { Text = "拾", BackColor = Accent, ForeColor = Color.White, TextAlign = ContentAlignment.MiddleCenter };
     readonly Label brand = new() { Text = "拾页", ForeColor = Color.FromArgb(29, 42, 49) };
     readonly Label caption = new() { Text = "本地小说书库", ForeColor = Color.FromArgb(111, 123, 131) };
@@ -23,6 +23,8 @@ internal sealed class StartupView : UserControl
     readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
     readonly Stopwatch clock = new();
     bool expanded;
+    bool dark;
+    int activeStage;
     public event EventHandler? RetryRequested;
     public event EventHandler? OpenLogsRequested;
 
@@ -93,9 +95,35 @@ internal sealed class StartupView : UserControl
     }
     public void SetStage(int current, string heading, string note)
     {
+        activeStage = current;
         title.Text = heading; description.Text = note;
-        for (int i = 0; i < steps.Length; i++) steps[i].ForeColor = i <= current ? Accent : Color.FromArgb(155, 164, 171);
+        ColorSteps();
         AppendLog(heading);
+    }
+    void ColorSteps()
+    {
+        for (int i = 0; i < steps.Length; i++) steps[i].ForeColor = i <= activeStage ? (dark ? Color.Gainsboro : Accent) : (dark ? Color.Gray : Color.FromArgb(155, 164, 171));
+    }
+    public void SetDark(bool value)
+    {
+        dark = value;
+        BackColor = dark ? Color.FromArgb(31, 32, 30) : Color.FromArgb(248, 248, 247);
+        card.BackColor = dark ? Color.FromArgb(40, 41, 38) : Color.White;
+        card.BorderColor = dark ? Color.FromArgb(64, 66, 59) : Color.FromArgb(226, 226, 220);
+        brand.ForeColor = title.ForeColor = dark ? Color.Gainsboro : Color.FromArgb(29, 42, 49);
+        caption.ForeColor = description.ForeColor = elapsed.ForeColor = footnote.ForeColor = dark ? Color.FromArgb(174, 180, 162) : Color.FromArgb(111, 123, 131);
+        foreach (var button in new[] { details, folder })
+        {
+            button.BackColor = dark ? Color.FromArgb(58, 62, 51) : Color.FromArgb(241, 241, 240);
+            button.ForeColor = dark ? Color.Gainsboro : Accent;
+        }
+        retry.BackColor = dark ? Color.FromArgb(216, 222, 205) : Accent;
+        retry.ForeColor = dark ? Color.FromArgb(36, 41, 29) : Color.White;
+        log.BackColor = dark ? Color.FromArgb(31, 33, 28) : Color.FromArgb(245, 247, 248);
+        log.ForeColor = dark ? Color.Silver : Color.FromArgb(74, 87, 98);
+        progress.TrackColor = dark ? Color.FromArgb(66, 70, 59) : Color.FromArgb(236, 236, 230);
+        progress.ForeColor = dark ? Color.FromArgb(189, 199, 171) : Color.FromArgb(91, 91, 82);
+        ColorSteps(); card.Invalidate();
     }
     public void AppendLog(string line)
     {
@@ -129,6 +157,7 @@ internal sealed class StartupView : UserControl
 
     sealed class Surface : Panel
     {
+        public Color BorderColor { get; set; } = Color.FromArgb(226, 226, 220);
         public Surface() { DoubleBuffered = true; BackColor = Color.White; }
         protected override void OnResize(EventArgs e)
         {
@@ -141,7 +170,7 @@ internal sealed class StartupView : UserControl
         {
             base.OnPaint(e); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             using var path = Rounded(new Rectangle(0, 0, Width - 1, Height - 1), 12 * DeviceDpi / 96);
-            using var pen = new Pen(Color.FromArgb(226, 226, 220)); e.Graphics.DrawPath(pen, path);
+            using var pen = new Pen(BorderColor); e.Graphics.DrawPath(pen, path);
         }
     }
 
@@ -164,20 +193,21 @@ internal sealed class StartupView : UserControl
 
     sealed class BusyBar : Control
     {
+        public Color TrackColor { get; set; } = Color.FromArgb(236, 236, 230);
         readonly System.Windows.Forms.Timer animation = new() { Interval = 40 };
         int offset;
         bool running;
         public bool Running { get => running; set { running = value; animation.Enabled = value && Visible; Invalidate(); } }
         public BusyBar()
         {
-            DoubleBuffered = true;
+            DoubleBuffered = true; ForeColor = Color.FromArgb(91, 91, 82);
             animation.Tick += (_, _) => { offset = (offset + 7) % Math.Max(1, Width + Width / 3); Invalidate(); };
         }
         protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); animation.Enabled = Visible && running; }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(Color.FromArgb(236, 236, 230));
-            if (running) { using var brush = new SolidBrush(Color.FromArgb(91, 91, 82)); e.Graphics.FillRectangle(brush, offset - Width / 3, 0, Width / 3, Height); }
+            e.Graphics.Clear(TrackColor);
+            if (running) { using var brush = new SolidBrush(ForeColor); e.Graphics.FillRectangle(brush, offset - Width / 3, 0, Width / 3, Height); }
         }
         protected override void Dispose(bool disposing) { if (disposing) animation.Dispose(); base.Dispose(disposing); }
     }

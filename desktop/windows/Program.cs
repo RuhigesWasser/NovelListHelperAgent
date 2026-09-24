@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Runtime.InteropServices;
+using Microsoft.Win32;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -27,7 +29,7 @@ internal sealed class DesktopWindow : Form
     readonly bool smoke;
     readonly StartupView startup = new();
     readonly string? preview;
-    bool starting, attempted, webConfigured;
+    bool starting, attempted, webConfigured, restoreMaximized;
     WebView2 web = new() { Dock = DockStyle.Fill };
     readonly HttpClient http = new(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(4) };
     Process? backend;
@@ -35,6 +37,10 @@ internal sealed class DesktopWindow : Form
     JsonElement state;
     string address = "";
     bool closing;
+    FormWindowState lastWindowState = FormWindowState.Normal;
+    string theme = "system";
+    [DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
     CoreWebView2Environment? environment;
 
     public DesktopWindow(string root, bool smoke, string? preview = null)
@@ -43,7 +49,11 @@ internal sealed class DesktopWindow : Form
         Text = "拾页"; Width = 1280; Height = 850;
         MinimumSize = new Size(760, 540);
         Font = new Font("Microsoft YaHei UI", 9F);
-        BackColor = Color.FromArgb(246, 247, 249); StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Color.FromArgb(246, 247, 249); StartPosition = FormStartPosition.Manual;
+        theme = DesktopPreferences.ReadTheme(root);
+        HandleCreated += (_, _) => { if ((!smoke && preview == null) || preview == "window") RestorePlacement(); ApplyTheme(); };
+        Resize += (_, _) => { if (WindowState != FormWindowState.Minimized) lastWindowState = WindowState; };
+        SystemEvents.UserPreferenceChanged += SystemThemeChanged;
         Controls.Add(web); Controls.Add(startup); startup.BringToFront();
         startup.RetryRequested += async (_, _) => await StartAsync();
         startup.OpenLogsRequested += (_, _) => {
@@ -52,9 +62,42 @@ internal sealed class DesktopWindow : Form
             Process.Start(new ProcessStartInfo(logs) { UseShellExecute = true });
         };
         if (smoke) { if (preview == null) WindowState = FormWindowState.Minimized; ShowInTaskbar = false; }
-        Shown += async (_, _) => { if (preview != null) await PreviewAsync(); else await StartAsync(); };
-        FormClosed += (_, _) => { http.Dispose(); backend?.Dispose(); };
+        Shown += async (_, _) => { if (restoreMaximized) WindowState = FormWindowState.Maximized; if (preview != null) await PreviewAsync(); else await StartAsync(); };
+        FormClosed += (_, _) => { SystemEvents.UserPreferenceChanged -= SystemThemeChanged; http.Dispose(); backend?.Dispose(); };
         FormClosing += OnClosing;
+    }
+
+    void RestorePlacement()
+    {
+        var saved = DesktopPreferences.ReadWindow(root);
+        var screen = saved == null ? Screen.FromPoint(Cursor.Position) : Screen.FromRectangle(new Rectangle(saved.X, saved.Y, Math.Max(1, saved.Width), Math.Max(1, saved.Height)));
+        Rectangle area = screen.WorkingArea;
+        double scale = saved != null && saved.Dpi > 0 ? (double)DeviceDpi / saved.Dpi : 1;
+        int width = saved == null ? (int)(area.Width * .92) : (int)(saved.Width * scale);
+        int height = saved == null ? (int)(area.Height * .92) : (int)(saved.Height * scale);
+        width = Math.Clamp(width, Math.Min(760, area.Width), area.Width);
+        height = Math.Clamp(height, Math.Min(540, area.Height), area.Height);
+        MinimumSize = new Size(Math.Min(760, area.Width), Math.Min(540, area.Height));
+        int x = saved == null ? area.Left + (area.Width - width) / 2 : Math.Clamp(saved.X, area.Left, area.Right - width);
+        int y = saved == null ? area.Top + (area.Height - height) / 2 : Math.Clamp(saved.Y, area.Top, area.Bottom - height);
+        Bounds = new Rectangle(x, y, width, height);
+        restoreMaximized = saved?.Maximized == true;
+        if (restoreMaximized) WindowState = FormWindowState.Maximized;
+    }
+
+    void SystemThemeChanged(object sender, UserPreferenceChangedEventArgs e)
+    {
+        if (theme == "system" && IsHandleCreated && !closing) BeginInvoke(new Action(ApplyTheme));
+    }
+
+    void ApplyTheme()
+    {
+        bool dark = DesktopPreferences.IsDark(theme);
+        BackColor = dark ? Color.FromArgb(32, 33, 32) : Color.White;
+        startup.SetDark(dark); web.DefaultBackgroundColor = BackColor;
+        if (IsHandleCreated) { int value = dark ? 1 : 0; DwmSetWindowAttribute(Handle, 20, ref value, sizeof(int)); }
+        if (web.CoreWebView2 != null)
+            web.CoreWebView2.Profile.PreferredColorScheme = theme == "dark" ? CoreWebView2PreferredColorScheme.Dark : theme == "light" ? CoreWebView2PreferredColorScheme.Light : CoreWebView2PreferredColorScheme.Auto;
     }
 
     async Task<bool> FindBackendAsync()
@@ -125,6 +168,13 @@ internal sealed class DesktopWindow : Form
         if (!smoke) return;
         await Task.Delay(200);
         Directory.CreateDirectory(Path.Combine(root, ".local"));
+        if (preview == "window")
+        {
+            Rectangle bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            var placement = new WindowPlacement(bounds.X, bounds.Y, bounds.Width, bounds.Height, DeviceDpi, WindowState == FormWindowState.Maximized);
+            await File.WriteAllTextAsync(Path.Combine(root, ".local", "desktop-window-check.json"), JsonSerializer.Serialize(new { placement, workArea = Screen.FromControl(this).WorkingArea }));
+            DesktopPreferences.SaveWindow(root, placement);
+        }
         using var bitmap = new Bitmap(startup.Width, startup.Height);
         startup.DrawToBitmap(bitmap, startup.ClientRectangle);
         bitmap.Save(Path.Combine(root, ".local", "desktop-startup-" + (preview == "error" ? "error" : "setup") + ".png"));
@@ -179,6 +229,19 @@ internal sealed class DesktopWindow : Form
             if (!webConfigured)
             {
             webConfigured = true;
+            ApplyTheme();
+            web.CoreWebView2.WebMessageReceived += (_, e) =>
+            {
+                if (!e.Source.StartsWith(address + "/", StringComparison.OrdinalIgnoreCase)) return;
+                try
+                {
+                    using var data = JsonDocument.Parse(e.WebMessageAsJson);
+                    if (data.RootElement.GetProperty("type").GetString() != "appearance") return;
+                    var choice = data.RootElement.GetProperty("theme").GetString();
+                    if (choice is "system" or "light" or "dark") { theme = choice; ApplyTheme(); }
+                }
+                catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException) { }
+            };
             web.CoreWebView2.Settings.IsPasswordAutosaveEnabled = false;
             web.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
             web.CoreWebView2.NavigationStarting += (_, e) =>
@@ -248,6 +311,12 @@ internal sealed class DesktopWindow : Form
     async void OnClosing(object? sender, FormClosingEventArgs e)
     {
         if (closing) return;
+        if (!smoke && preview == null)
+        {
+            Rectangle bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            try { DesktopPreferences.SaveWindow(root, new WindowPlacement(bounds.X, bounds.Y, bounds.Width, bounds.Height, DeviceDpi, lastWindowState == FormWindowState.Maximized)); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { startup.AppendLog("窗口尺寸未能保存：" + error.Message); }
+        }
         closing = true;
         if (setup is { HasExited: false }) setup.Kill(entireProcessTree: true);
         if (backend is { HasExited: false })

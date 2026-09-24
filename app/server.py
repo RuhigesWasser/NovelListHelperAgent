@@ -95,6 +95,10 @@ class OrganizeSettings(BaseModel):
     auto_multi_book: bool = False
 
 
+class AppearanceSettings(BaseModel):
+    theme: Literal['system','light','dark'] = 'system'
+
+
 class RecoverySettings(BaseModel):
     mode: Literal['off','text','vision'] = 'off'
     max_calls: int = Field(default=3,ge=1,le=1000)
@@ -170,6 +174,16 @@ def create_app(local, token, shutdown=lambda: None):
 
     def model_config():
         return {**llm_settings.current(),'recovery':recovery_tools.settings(local),**organize_settings()}
+
+    @app.get('/api/appearance')
+    def appearance():
+        path=local/'ui-settings.json'
+        return AppearanceSettings(**(json.loads(path.read_text(encoding='utf8')) if path.exists() else {})).model_dump()
+
+    @app.post('/api/appearance')
+    def save_appearance(value: AppearanceSettings):
+        recovery_tools.write_json(local/'ui-settings.json',value.model_dump())
+        return value.model_dump()
 
     @app.get('/api/organize/settings')
     def organize_settings():
@@ -344,7 +358,7 @@ def create_app(local, token, shutdown=lambda: None):
     @app.get('/')
     def index():
         text = (ROOT/'app/static/index.html').read_text(encoding='utf-8')
-        return HTMLResponse(text.replace('__SESSION_TOKEN__', token))
+        return HTMLResponse(text.replace('__SESSION_TOKEN__', token).replace('__THEME__',appearance()['theme']))
 
     @app.get('/api/settings')
     def read_settings():
