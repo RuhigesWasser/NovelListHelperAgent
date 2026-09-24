@@ -16,7 +16,8 @@ internal static class Program
         int option = Array.IndexOf(args, "--root");
         if (option >= 0 && option + 1 < args.Length) root = Path.GetFullPath(args[option + 1]);
         bool smoke = args.Contains("--smoke");
-        Application.Run(new DesktopWindow(root, smoke));
+        string? preview = args.FirstOrDefault(arg => arg.StartsWith("--startup-preview="))?.Split('=', 2)[1];
+        Application.Run(new DesktopWindow(root, smoke, preview));
     }
 }
 
@@ -24,8 +25,10 @@ internal sealed class DesktopWindow : Form
 {
     readonly string root;
     readonly bool smoke;
-    readonly Label status = new() { Dock = DockStyle.Top, Height = 32, Text = "正在启动本地服务…", TextAlign = ContentAlignment.MiddleLeft };
-    readonly WebView2 web = new() { Dock = DockStyle.Fill };
+    readonly StartupView startup = new();
+    readonly string? preview;
+    bool starting, attempted, webConfigured;
+    WebView2 web = new() { Dock = DockStyle.Fill };
     readonly HttpClient http = new(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(4) };
     Process? backend;
     Process? setup;
@@ -34,16 +37,23 @@ internal sealed class DesktopWindow : Form
     bool closing;
     CoreWebView2Environment? environment;
 
-    public DesktopWindow(string root, bool smoke)
+    public DesktopWindow(string root, bool smoke, string? preview = null)
     {
-        this.root = root; this.smoke = smoke;
-        Text = "拾页 · 小说书单"; Width = 1280; Height = 850;
+        this.root = root; this.smoke = smoke; this.preview = preview;
+        Text = "拾页"; Width = 1280; Height = 850;
         MinimumSize = new Size(760, 540);
         Font = new Font("Microsoft YaHei UI", 9F);
         BackColor = Color.FromArgb(246, 247, 249); StartPosition = FormStartPosition.CenterScreen;
-        Controls.Add(web); Controls.Add(status);
-        if (smoke) { WindowState = FormWindowState.Minimized; ShowInTaskbar = false; }
-        Shown += async (_, _) => await StartAsync();
+        Controls.Add(web); Controls.Add(startup); startup.BringToFront();
+        startup.RetryRequested += async (_, _) => await StartAsync();
+        startup.OpenLogsRequested += (_, _) => {
+            string logs = Path.Combine(root, ".local", "logs");
+            Directory.CreateDirectory(logs);
+            Process.Start(new ProcessStartInfo(logs) { UseShellExecute = true });
+        };
+        if (smoke) { if (preview == null) WindowState = FormWindowState.Minimized; ShowInTaskbar = false; }
+        Shown += async (_, _) => { if (preview != null) await PreviewAsync(); else await StartAsync(); };
+        FormClosed += (_, _) => { http.Dispose(); backend?.Dispose(); };
         FormClosing += OnClosing;
     }
 
@@ -83,28 +93,54 @@ internal sealed class DesktopWindow : Form
     async Task SetupAsync()
     {
         if (smoke) throw new InvalidOperationException("Smoke test requires an existing ready backend/runtime.");
+        startup.SetStage(1, "准备运行环境", "首次使用需要下载 Python 和依赖，全部保存在应用目录。");
         var answer = MessageBox.Show(this,
             "首次使用或更新需要下载私有 Python 和依赖，全部保存到程序目录的 .runtime 中。不会修改系统 PATH 或注册开机启动。是否允许安装？",
             "准备本地运行环境", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         if (answer != DialogResult.Yes) throw new OperationCanceledException("已取消安装。");
-        status.Text = "正在准备环境，首次下载可能需要几分钟…";
+        startup.SetStage(1, "正在准备运行环境", "首次下载可能需要几分钟。完成后会自动打开书库。");
         var info = new ProcessStartInfo("powershell.exe") { WorkingDirectory = root, UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (string arg in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(root, "scripts", "launcher.ps1"), "-Mode", "setup" }) info.ArgumentList.Add(arg);
         using var process = Process.Start(info) ?? throw new IOException("无法启动环境安装程序。");
         setup = process;
-        var output = process.StandardOutput.ReadToEndAsync(); var error = process.StandardError.ReadToEndAsync();
+        Directory.CreateDirectory(Path.Combine(root, ".local", "logs"));
+        try
+        {
+        var output = SaveLogAsync(process.StandardOutput, "desktop-setup.out.log");
+        var error = SaveLogAsync(process.StandardError, "desktop-setup.err.log");
         await process.StandardInput.WriteLineAsync("y"); process.StandardInput.Close();
         await process.WaitForExitAsync();
-        string log = await output + "\n" + await error;
-        setup = null;
-        Directory.CreateDirectory(Path.Combine(root, ".local", "logs"));
-        await File.WriteAllTextAsync(Path.Combine(root, ".local", "logs", "desktop-setup.log"), log);
-        if (process.ExitCode != 0) throw new IOException("环境准备失败，请查看 .local/logs/desktop-setup.log。");
+        await Task.WhenAll(output, error);
+        if (process.ExitCode != 0) throw new IOException("环境准备未完成。请查看启动日志，检查网络连接后重试。");
+        }
+        finally { setup = null; }
+    }
+
+    async Task PreviewAsync()
+    {
+        startup.SetStage(1, "正在准备运行环境", "首次下载可能需要几分钟。完成后会自动打开书库。");
+        startup.AppendLog("界面预览，不执行下载或安装。");
+        if (preview == "error") startup.ShowError("无法连接下载服务器。请检查网络连接后重试。");
+        if (!smoke) return;
+        await Task.Delay(200);
+        Directory.CreateDirectory(Path.Combine(root, ".local"));
+        using var bitmap = new Bitmap(startup.Width, startup.Height);
+        startup.DrawToBitmap(bitmap, startup.ClientRectangle);
+        bitmap.Save(Path.Combine(root, ".local", "desktop-startup-" + (preview == "error" ? "error" : "setup") + ".png"));
+        Close();
     }
 
     async Task StartAsync()
     {
+        if (starting || closing) return;
+        starting = true; startup.Visible = true; startup.BringToFront(); startup.Begin();
+        if (attempted && web.CoreWebView2 == null)
+        {
+            Controls.Remove(web); web.Dispose(); web = new WebView2 { Dock = DockStyle.Fill };
+            Controls.Add(web); startup.BringToFront(); webConfigured = false;
+        }
+        attempted = true;
         try
         {
             if (!File.Exists(Path.Combine(root, "app", "main.py"))) throw new IOException("应用文件不完整，请解压完整发行包。");
@@ -116,6 +152,10 @@ internal sealed class DesktopWindow : Form
             if (!await FindBackendAsync())
             {
                 if (!RuntimeReady()) await SetupAsync();
+                if (closing) return;
+                if (backend is { HasExited: false }) { backend.Kill(entireProcessTree: true); await backend.WaitForExitAsync(); }
+                backend?.Dispose(); backend = null;
+                startup.SetStage(2, "正在启动本地服务", "连接本机服务，书籍和任务记录将自动载入。");
                 Directory.CreateDirectory(Path.Combine(root, ".local", "logs"));
                 var info = new ProcessStartInfo(PythonPath) { WorkingDirectory = root, UseShellExecute = false, CreateNoWindow = true,
                     RedirectStandardOutput = true, RedirectStandardError = true };
@@ -131,8 +171,14 @@ internal sealed class DesktopWindow : Form
                 }
                 if (address == "") throw new IOException("本地服务启动失败，请查看 .local/logs 中的日志。");
             }
+            if (closing) return;
+            startup.SetStage(3, "正在打开书库", "环境已就绪，正在加载应用界面。");
             environment = await CoreWebView2Environment.CreateAsync(userDataFolder: Path.Combine(root, ".local", "webview2"));
             await web.EnsureCoreWebView2Async(environment);
+            if (closing) return;
+            if (!webConfigured)
+            {
+            webConfigured = true;
             web.CoreWebView2.Settings.IsPasswordAutosaveEnabled = false;
             web.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
             web.CoreWebView2.NavigationStarting += (_, e) =>
@@ -158,8 +204,9 @@ internal sealed class DesktopWindow : Form
             };
             web.CoreWebView2.NavigationCompleted += async (_, e) =>
             {
-                status.Visible = !e.IsSuccess;
-                status.Text = e.IsSuccess ? "本机运行 · 数据保存在程序目录" : "页面加载失败，可关闭后重新打开。";
+                if (closing) return;
+                if (e.IsSuccess) { startup.Complete(); web.BringToFront(); }
+                else startup.ShowError("页面未能加载。可以重试，或打开日志目录查看详情。");
                 if (smoke)
                 {
                     await File.WriteAllTextAsync(Path.Combine(root, ".local", "desktop-smoke.json"),
@@ -167,24 +214,31 @@ internal sealed class DesktopWindow : Form
                     Close();
                 }
             };
-            web.Source = new Uri(address);
+            }
+            web.CoreWebView2.Navigate(address);
         }
         catch (Exception error)
         {
-            if (!smoke) MessageBox.Show(this, error.Message, "拾页", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (closing) return;
+            if (!smoke) startup.ShowError(error.Message);
             else
             {
                 Directory.CreateDirectory(Path.Combine(root, ".local"));
                 await File.WriteAllTextAsync(Path.Combine(root, ".local", "desktop-smoke.json"), JsonSerializer.Serialize(new { success = false, error = error.Message }));
             }
-            Close();
+            if (smoke) Close();
         }
+        finally { starting = false; }
     }
 
     async Task SaveLogAsync(StreamReader reader, string name)
     {
         await using var writer = new StreamWriter(Path.Combine(root, ".local", "logs", name), false);
-        while (await reader.ReadLineAsync() is string line) { await writer.WriteLineAsync(line); await writer.FlushAsync(); }
+        while (await reader.ReadLineAsync() is string line)
+        {
+            await writer.WriteLineAsync(line); await writer.FlushAsync();
+            if (!closing && !startup.IsDisposed) startup.AppendLog(line);
+        }
     }
     static void OpenExternal(string value)
     {
@@ -194,10 +248,12 @@ internal sealed class DesktopWindow : Form
     async void OnClosing(object? sender, FormClosingEventArgs e)
     {
         if (closing) return;
+        closing = true;
         if (setup is { HasExited: false }) setup.Kill(entireProcessTree: true);
         if (backend is { HasExited: false })
         {
-            e.Cancel = true; closing = true; status.Text = "正在停止本次启动的服务…";
+            e.Cancel = true; startup.Visible = true; startup.BringToFront();
+            startup.SetStage(2, "正在退出拾页", "正在停止本次启动的服务，已保存的内容会保留。");
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Post, address + "/api/shutdown");
@@ -209,6 +265,6 @@ internal sealed class DesktopWindow : Form
             catch { if (!backend.HasExited) backend.Kill(entireProcessTree: true); }
             Close(); return;
         }
-        web.Dispose(); http.Dispose();
+
     }
 }

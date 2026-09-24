@@ -19,6 +19,7 @@ for(const id of ['#upload','#upload-folder'])$(id).addEventListener('change',()=
   $(id==='#upload'?'#upload-folder':'#upload').value='';
 });
 $('#engine').addEventListener('change',()=>$('#engine-help').textContent=$('#engine').value==='builtin'?'OCR 在本机运行；启用 LLM 提取或多模态兜底时，会按设置发送文字或图片。':'图片将发送到你配置的 API 服务，可能产生调用费用。');
+$('#engine').addEventListener('change',()=>$('#task-engine-summary').textContent=$('#engine').value==='builtin'?'内置 OCR':'多模态 LLM');
 function asBase64(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(file);});}
 let failedBatch=[];
 let organizeSettingsReady=Promise.resolve();
