@@ -26,9 +26,20 @@ $properties=@("-p:BaseIntermediateOutputPath=$intermediate","-p:MSBuildProjectEx
 if($LASTEXITCODE -ne 0){throw 'Desktop restore failed.'}
 & dotnet publish $project -c Release -r win-x64 --self-contained $selfContained --no-restore -o $stage @properties
 if($LASTEXITCODE -ne 0){throw 'Desktop build failed.'}
+foreach($package in @('microsoft.netcore.app.runtime.win-x64','microsoft.windowsdesktop.app.runtime.win-x64','microsoft.web.webview2')){
+  $packageRoot=Join-Path $env:NUGET_PACKAGES $package
+  if(Test-Path -LiteralPath $packageRoot){
+    foreach($license in (Get-ChildItem -LiteralPath $packageRoot -Recurse -File | Where-Object { $_.Name -match '^(LICENSE|NOTICE|ThirdParty)' })){
+      $relative=$license.FullName.Substring($env:NUGET_PACKAGES.Length+1)
+      $target=Join-Path (Join-Path $stage 'vendor\licenses') $relative
+      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+      Copy-Item -LiteralPath $license.FullName -Destination $target
+    }
+  }
+}
 Push-Location $appRoot
 try{
-  & .runtime/venv/Scripts/python.exe -B -m scripts.package_apps --edition windows --stage $stage --zip (Join-Path $output 'Shiye-Windows-x64.zip')
+  & .runtime/venv/Scripts/python.exe -B -m scripts.package_apps --edition windows --stage $stage --windows-bootstrap --zip (Join-Path $output 'Shiye-Windows-x64.zip')
   if($LASTEXITCODE -ne 0){throw 'Desktop packaging failed.'}
 }finally{Pop-Location}
 @{stage=$stage;archive=(Join-Path $output 'Shiye-Windows-x64.zip');self_contained=(-not $FrameworkDependent)} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'windows-build.json') -Encoding UTF8

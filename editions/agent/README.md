@@ -4,7 +4,7 @@
 
 ## 准备环境
 
-Windows 双击 `Setup.cmd`。首次下载 Python 3.12 和依赖需要确认，环境位于 `.runtime`。macOS/Linux 执行 `bash scripts/launcher.sh setup`，Python 位于 `.runtime/posix/<平台>/venv/bin/python`。
+Windows 双击 `Setup.cmd`。Windows 运行包预置 Python 和 uv，源码包不含运行时。首次准备环境需要确认，剩余依赖从 `download-sources.conf` 指定的包源安装到 `.runtime`。运行不需要 Git。macOS/Linux 执行 `bash scripts/launcher.sh setup`，Python 位于 `.runtime/posix/<平台>/venv/bin/python`。
 
 ## 调用
 

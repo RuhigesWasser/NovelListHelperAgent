@@ -136,9 +136,9 @@ internal sealed class DesktopWindow : Form
     async Task SetupAsync()
     {
         if (smoke) throw new InvalidOperationException("Smoke test requires an existing ready backend/runtime.");
-        startup.SetStage(1, "准备运行环境", "首次使用需要下载 Python 和依赖，全部保存在应用目录。");
+        startup.SetStage(1, "准备运行环境", "优先使用包内 Python，缺少的依赖下载到应用目录。");
         var answer = MessageBox.Show(this,
-            "首次使用或更新需要下载私有 Python 和依赖，全部保存到程序目录的 .runtime 中。不会修改系统 PATH 或注册开机启动。是否允许安装？",
+            "首次使用或更新需要准备目录内运行环境。优先使用包内 Python，其余依赖从配置的下载源获取，保存在 .runtime 中。不会修改系统 PATH 或注册开机启动。是否允许准备环境？",
             "准备本地运行环境", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         if (answer != DialogResult.Yes) throw new OperationCanceledException("已取消安装。");
         startup.SetStage(1, "正在准备运行环境", "首次下载可能需要几分钟。完成后会自动打开书库。");

@@ -94,3 +94,11 @@ Windows 首次启动使用当前屏幕工作区约 92% 的窗口大小，之后�
 ## 设置目录
 
 设置页按 LLM 多模态、ESJ 账号、识别兜底、OCR 模型、数据与清理分类。电脑端点击左侧目录切换，右侧只显示当前类别；手机端通过顶部分类下拉框切换。切换类别会保留本页未提交的输入和滚动位置，不会自动保存或登录，配置仍需点击各自的保存按钮。目录支持上下方向键、Home 和 End 键。
+
+## 分发包与下载源
+
+运行包包含全部应用代码、界面和脚本，不需要 Git，也不依赖运行时访问项目仓库。Windows 程序包还包含 `vendor` 中的私有 Python 和 uv；首次使用经确认后安装剩余依赖。源码包不包含这些二进制。
+
+`download-sources.conf` 的 `PACKAGE_INDEX` 指定首选包源，`PACKAGE_FALLBACK` 指定备用源，默认分别为清华 PyPI 镜像和 PyPI 官方源。安装保留锁文件中的版本和 SHA-256 校验，不修改全局 pip 配置。`PYTHON_MIRROR` 供未预置 Python 的源码安装使用，需指向 python-build-standalone 发布目录镜像。macOS/Linux 源码启动还可设置 `UV_RELEASE_MIRROR`，指向 uv 发布归档的镜像根目录。
+
+镜像只用于第三方依赖；抓取小说平台和调用 LLM 仍按各自地址访问。Windows 的 WebView2 仍为共享运行环境，B/S 入口不需要它。
