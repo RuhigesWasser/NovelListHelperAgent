@@ -565,7 +565,7 @@ def create_app(local, token, shutdown=lambda: None):
         if value.floor_index >= len(data['floors']) or value.image_index >= data['images'][value.floor_index]:
             raise HTTPException(400, '请选择有效图片来源')
         item = value.model_dump(exclude={'url'})
-        item.update({key:edited[key] for key in ('user_edited','extraction','alternative_titles') if key in edited})
+        item.update({key:edited[key] for key in ('user_edited','extraction','alternative_titles','alternative_queries','title_complete') if key in edited})
         item['floor'] = data['floors'][value.floor_index]
         try:
             if value.url:
@@ -605,7 +605,10 @@ def create_app(local, token, shutdown=lambda: None):
             previous=plan['items'][item_id] if item_id<len(plan['items']) else {}
             item['user_edited']=bool(previous.get('user_edited') or not previous or any(previous.get(key)!=item.get(key) for key in ('title','author','platform','category')))
             if previous.get('extraction'):item['extraction']=previous['extraction']
-            if previous.get('alternative_titles') and all(previous.get(key)==item.get(key) for key in ('title','author','platform')):item['alternative_titles']=previous['alternative_titles']
+            if all(previous.get(key)==item.get(key) for key in ('title','author','platform')):
+                if 'title_complete' in previous:item['title_complete']=previous['title_complete']
+                for field in ('alternative_titles','alternative_queries'):
+                    if previous.get(field):item[field]=previous[field]
             if item_id == len(plan['items']):
                 plan['items'].append(item)
             else:

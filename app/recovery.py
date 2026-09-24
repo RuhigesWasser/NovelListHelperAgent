@@ -92,13 +92,9 @@ class Recovery:
         verified=self.config.get('verification',{})
         if not verified.get('ok') or verified.get('fingerprint')!=fingerprint(self.config):
             self.record('reocr','skipped','当前模型配置尚未验证图片能力，请在设置中重新启用识图兜底');return None
-        from PIL import Image,ImageOps
-        import io
-        with Image.open(path) as source:
-            image=ImageOps.exif_transpose(source).convert('RGB')
-            image.thumbnail((1800,3000))
-            buffer=io.BytesIO();image.save(buffer,format='PNG')
-        text=self.ask('reocr','逐字转写图片中可见文字，保留换行，只返回文字。没有文字则返回 __NO_TEXT__。',buffer.getvalue())
+        from app.image_books import image_parts
+        parts=image_parts(path)
+        text=self.ask('reocr','逐字转写图片中可见文字，保留换行，只返回文字。附图是同一原图的放大部分，不要重复转写；仔细核对书名和作者的细小字。忽略覆盖其上的水印。没有文字则返回 __NO_TEXT__。',parts[0] if len(parts)==1 else parts)
         if text is not None:
             self.record('reocr','succeeded','指定图片已重新识别')
             return '' if text.strip()=='__NO_TEXT__' else text

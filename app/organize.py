@@ -95,6 +95,11 @@ def image_hint(text):
 def image_hints(text,context=''):
     text=text.replace('\r','\n')
     lines=[s.strip() for s in text.splitlines() if s.strip()]
+    if '已加入书架' in text and '去详情' in text:
+        author_row=next((i for i,line in enumerate(lines) if re.search(r'[·・].*(小时前|分钟前|天前|刚刚|更新)',line)),None)
+        if author_row is not None:
+            heading=next((line for line in lines[:author_row] if len(line)>2 and line not in ('继续阅读','书架','返回')), '')
+            if heading:return [{'title':heading[:100],'author':re.split('[·・]',lines[author_row])[0].strip()[:200],'platform':'all','category':'待分类'}]
     # Explicit field labels work across platforms, languages and page templates.
     labelled=[];current=None
     aliases={'菠萝包':'sfacg','SF轻小说':'sfacg','刺猬猫':'ciweimao','起点':'qidian','番茄':'fanqie','ESJ':'esj'}
@@ -159,12 +164,51 @@ def layout_hints(layout,context=''):
     return hints if len(hints)>1 else []
 
 
+def detail_layout_hint(layout,context=''):
+    if not layout:return []
+    text='\n'.join(row['text'] for row in layout)
+    def x(row):return min(p[0] for p in row['box'])
+    def y(row):return min(p[1] for p in row['box'])
+    def h(row):return max(p[1] for p in row['box'])-y(row)
+    width=max(p[0] for row in layout for p in row['box'])
+    platform='qidian' if re.search('出圈指数|正在投资|起点',text+context) else 'fanqie' if re.search('番茄原创|在读人数不足|正在阅读',text) else 'sfacg' if ('点赞' in text and ('月票' in text or '人气' in text)) else ''
+    if not platform:return []
+    if platform=='qidian':anchor=next((row for row in layout[:20] if re.fullmatch(r'[\u3400-\u9fff]+[·・][\u3400-\u9fff]+',row['text'].strip())),None)
+    elif platform=='fanqie':anchor=next((row for row in layout[:20] if re.search('连载|完结',row['text'])),None)
+    else:anchor=next((row for row in layout[:20] if row['text'].strip('|丨｜ ') in GENRES or re.search(r'(连载|完结).*(字|万)',row['text'])),None)
+    if not anchor:return []
+    aligned=[row for row in layout if y(row)<y(anchor) and abs(x(row)-x(anchor))<max(45,h(anchor)) and clean_header([row['text']])]
+    aligned=[row for row in aligned if not re.search(r'书架|中国联通|中国移动|中国电信|作品详情|^返回$',row['text'])]
+    if not aligned:return []
+    author=''
+    if platform=='qidian':
+        if len(aligned)<2:return []
+        author=aligned[-1]['text'].rstrip('>＞著 ').strip();aligned=aligned[:-1]
+    else:
+        after=[row for row in layout if y(row)>y(anchor)+h(anchor) and y(row)<y(anchor)+max(400,h(anchor)*8)]
+        for row in sorted(after,key=y):
+            value=row['text'].strip()
+            outside=x(row)>width*.57 if platform=='sfacg' else abs(x(row)-x(anchor))>max(130,h(anchor)*4)
+            if outside or re.search(r'日更|番茄原创|作家|评分|点评|荣誉|连载|完结|月票|点赞|收藏|人气|^No\.|^VIP$|^签约$|^简介$',value,re.I):continue
+            if not any(c.isalpha() for c in value) or re.search(r'\d.*字',value) or value in ('V','v'):continue
+            author=re.sub(r'^(?:作者|著者)[:：]\s*','',value);break
+        if platform=='fanqie':
+            marker=next((row for row in layout if re.search(r'作家\s*Lv',row['text'],re.I)),None)
+            if marker:
+                nearby=[row for row in layout if abs(y(row)-y(marker))<max(20,h(marker)) and x(row)<x(marker) and clean_header([row['text']])]
+                if nearby:author=max(nearby,key=x)['text']
+    title=''.join(row['text'] for row in sorted(aligned,key=y))
+    category=anchor['text'].split('·')[0] if platform=='qidian' else next((g for g in GENRES if g in anchor['text']),'待分类')
+    return [{'title':title[:100],'author':author[:200],'platform':platform,'category':category}]
+
+
 def extract(result, floors,context='',layouts=None):
     items, skipped, seen = [], [], set()
     for f, floor in enumerate(result):
         for i, text in enumerate(floor['images']):
             source = {'floor_index': f, 'floor': floors[f], 'image_index': i}
-            spatial=layout_hints((layouts or {}).get(f'{f}:{i}',{}).get('layout',[]),context)
+            boxes=(layouts or {}).get(f'{f}:{i}',{}).get('layout',[])
+            spatial=detail_layout_hint(boxes,context) or layout_hints(boxes,context)
             for hint in spatial or image_hints(text,context):
                 if not hint['title']:
                     skipped.append({**source, 'reason': '未识别到文字，可能是插图；可查看原图或重新识别' if not text.strip() else '未提取到书籍标题，请校对文字或使用 LLM 提取'})
@@ -219,6 +263,7 @@ def parse_llm(response,result,floors):
                           'title': title[:100], 'author': str(value.get('author', ''))[:200],
                           'platform': value.get('platform') if value.get('platform') in providers.PLATFORMS else 'all',
                           'category': re.split(r'[,，、|/]',str(value.get('category') or '待分类'))[0].strip()[:50] or '待分类',
+                          'title_complete':value.get('title_complete') is not False,
                           'state': 'draft', 'candidates': [], 'warnings': []})
     except (ValueError, TypeError, KeyError, IndexError):
         raise ValueError('模型未返回有效书单，请重试或使用本地提取') from None
@@ -231,18 +276,22 @@ def parse_llm(response,result,floors):
 
 def verify(item):
     result=verify_query(item)
+    if item.get('title_complete') is False:
+        return {**result,'state':'review','book':None,'reason':'截图书名被截断或遮挡，请核对完整书名后确认。'}
     alternatives=[title for title in item.get('alternative_titles',[]) if title!=item['title']][:3]
+    queries=[{**item,'title':title} for title in alternatives]
+    queries += [{**item,**query} for query in item.get('alternative_queries',[])[:3]]
     checked=[result]
-    for title in alternatives:
-        checked.append(verify_query({**item,'title':title}))
+    for query in queries:
+        checked.append(verify_query(query))
     verified={entry['book']['url']:entry for entry in checked if entry['state']=='verified'}
     if len(verified)==1:return next(iter(verified.values()))
     if len(verified)>1:
         return {**result,'state':'review','book':None,'reason':'截图标题有分歧，多个作品均能匹配，请核对原图。'}
     if item['platform']!='all':
         verified={}
-        for title in [item['title'],*alternatives]:
-            try:cross=verify_query({**item,'title':title,'platform':'all'})
+        for query in [item,*queries]:
+            try:cross=verify_query({**query,'platform':'all'})
             except providers.ProviderError as error:
                 result.setdefault('warnings',[]).append('跨平台查询失败：'+str(error));continue
             if cross['state']=='verified':verified[cross['book']['url']]=cross
