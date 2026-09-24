@@ -39,7 +39,7 @@ async function submitBatch(items){
   progress.prepend(node('p',`已提交 ${count} 项，失败 ${failedBatch.length} 项。`));
   if(failedBatch.length){const retry=node('button','重试失败项','secondary');retry.type='button';retry.onclick=()=>submitBatch([...failedBatch]);progress.append(retry);}
   button.disabled=false;button.textContent='开始采集与识别 →';
-  notice(`已提交 ${count} 项任务。完成后点击任务查看结果。`);await loadJobs();
+  notice(`已提交 ${count} 项任务。完成后可从任务记录查看结果。`);jobsPage=0;await loadJobs();
 }
 $('#task-form').addEventListener('submit',async e=>{
   e.preventDefault();const isImage=$('[name=kind]:checked').value==='image';
@@ -48,16 +48,23 @@ $('#task-form').addEventListener('submit',async e=>{
   await submitBatch(items);
 });
 let pipelineBusy=false,previousPipeline='';
-async function loadJobs(){
-  const jobs=await json('/api/jobs');
-  const busy=j=>['queued','running'].includes(j.state)||['queued','running'].includes(j.organize_state);
-  $('#stat-total').textContent=jobs.length;$('#stat-running').textContent=jobs.filter(busy).length;
-  $('#stat-done').textContent=jobs.filter(j=>j.state==='succeeded'&&!busy(j)).length;
-  $('#queue-count').textContent=`${jobs.length} 个任务`;
+let jobRows=[],jobsPage=0,jobSnapshot='';
+const jobsPageSize=10;
+const busyJob=j=>['queued','running'].includes(j.state)||['queued','running'].includes(j.organize_state);
+$('#open-tasks').onclick=()=>$('#tasks-drawer').showModal();
+$('#close-tasks').onclick=()=>$('#tasks-drawer').close();
+$('#jobs-prev').onclick=()=>{jobsPage--;renderJobs();$('#jobs').scrollTop=0;};
+$('#jobs-next').onclick=()=>{jobsPage++;renderJobs();$('#jobs').scrollTop=0;};
+function renderJobs(){
+  const jobs=jobRows,busy=busyJob,pages=Math.max(1,Math.ceil(jobs.length/jobsPageSize));
+  jobsPage=Math.max(0,Math.min(jobsPage,pages-1));
+  $('#jobs-page').textContent=`${jobsPage+1} / ${pages} 页`;
+  $('#jobs-prev').disabled=jobsPage===0;$('#jobs-next').disabled=jobsPage===pages-1;
+  const scroll=$('#jobs').scrollTop;
   const list=$('#jobs');list.replaceChildren();if(!jobs.length)list.append(node('div','暂无任务','small-empty'));
-  for(const j of jobs){
-    const row=node('div',undefined,'job'),head=node('div',undefined,'job-title'),open=node('button',j.source||'图片识别');
-    open.title=j.source;open.onclick=()=>loadResult(j.id).catch(err=>notice(err.message,true));
+  for(const j of jobs.slice(jobsPage*jobsPageSize,(jobsPage+1)*jobsPageSize)){
+    const row=node('div',undefined,j.id===selected?'job selected-job':'job'),head=node('div',undefined,'job-title'),open=node('button',j.source||'图片识别');
+    open.title=j.source;open.onclick=()=>loadResult(j.id).then(()=>{$('#tasks-drawer').close();renderJobs();}).catch(err=>notice(err.message,true));
     const stage=j.state==='succeeded'?j.organize_state:'';
     const statusText=stage?({review:'待核对',succeeded:'整理完成',running:'整理中',queued:'等待整理',waiting:'等待整理',failed:'整理失败',cancelled:'整理已取消',interrupted:'整理已中断'}[stage]||'OCR 已完成'):(j.state==='succeeded'?'OCR 已完成':labels[j.state]||j.state);
     head.append(open,node('span',statusText,`pill ${stage||j.state}`));
@@ -75,6 +82,16 @@ async function loadJobs(){
     }
     const recover=node('button','恢复失败项','quiet');recover.onclick=()=>post(`/api/jobs/${j.id}/recover`).then(()=>{notice('恢复任务已加入队列');loadJobs();}).catch(e=>notice(e.message,true));if(!busy(j)&&(['failed','cancelled','interrupted'].includes(j.state)||['failed','review','interrupted','cancelled'].includes(j.organize_state)))actions.append(recover);row.append(actions);if(j.error||j.organize_error)row.append(node('p',j.error||j.organize_error,'help'));list.append(row);
   }
+  $('#jobs').scrollTop=scroll;
+}
+async function loadJobs(){
+  const jobs=await json('/api/jobs');
+  const busy=j=>['queued','running'].includes(j.state)||['queued','running'].includes(j.organize_state);
+  $('#stat-total').textContent=jobs.length;$('#stat-running').textContent=jobs.filter(busy).length;
+  $('#stat-done').textContent=jobs.filter(j=>j.state==='succeeded'&&!busy(j)).length;
+  $('#queue-count').textContent=`${jobs.length} 个任务`;
+  jobRows=jobs;$('#task-total').textContent=jobs.length;
+  const snapshot=JSON.stringify(jobs);if(snapshot!==jobSnapshot){renderJobs();jobSnapshot=snapshot;}
   const current=jobs.find(j=>j.id===selected);
   pipelineBusy=!!current&&['waiting','queued','running'].includes(current.organize_state);
   const version=current?`${current.id}:${current.organize_state}:${current.organize_stage}`:'';
@@ -84,7 +101,61 @@ async function loadJobs(){
   $('#save-result').disabled=pipelineBusy||current?.state!=='succeeded';
   if(pipelineBusy)$('#organizer').querySelectorAll('button,input,select').forEach(n=>n.disabled=true);
 }
-async function loadResult(id){const d=await json(`/api/jobs/${id}/result`);selected=id;pipelineBusy=['waiting','queued','running'].includes(d.job.organize_state);if(d.job.state!=='succeeded'&&!d.result.length){$('#result-content').hidden=true;$('#result-empty').hidden=false;notice(d.job.error||'任务尚未完成，请稍后查看。',!!d.job.error);return;}resultData=d.result;$('#organizer').hidden=d.job.state!=='succeeded';if(d.job.state==='succeeded')loadPlan(id).catch(e=>notice(e.message,true));else notice(d.job.error||'当前显示已保存的部分结果，恢复后继续处理。',true);loadRecoveryLog(id).catch(e=>notice(e.message,true));$('#result-empty').hidden=true;$('#result-content').hidden=false;$('#result-content').dataset.job=id;$('#result-content').dataset.state=d.job.state;$('#result-source').textContent=d.job.source;$('#result-engine').textContent=d.job.engine==='builtin'?('内置 OCR · '+(languageNames[d.job.language]||languageNames.zh)):'LLM 多模态';imageUrls.forEach(u=>URL.revokeObjectURL(u));imageUrls=[];const fields=$('#result-fields');fields.replaceChildren();for(let f=0;f<resultData.length;f++){const floor=resultData[f],floorNumber=d.floors?.[f]??(f+1),section=node('section',undefined,'result-floor');section.append(node('h3',`楼层 ${floorNumber}`));const text=node('textarea');text.value=floor.text;text.rows=2;text.setAttribute('aria-label',`楼层 ${floorNumber} 正文`);text.oninput=()=>floor.text=text.value;section.append(text);for(let i=0;i<floor.images.length;i++){const pair=node('div',undefined,'image-pair'),img=node('img'),ta=node('textarea');img.alt=`楼层 ${floorNumber} 的第 ${i+1} 张原图（点击放大）`;img.tabIndex=0;img.setAttribute('role','button');img.onclick=()=>{if(img.src)window.open(img.src,'_blank','noopener');};img.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();img.click();}};ta.value=floor.images[i];ta.setAttribute('aria-label',`图片 ${i+1} 识别文字`);ta.oninput=()=>floor.images[i]=ta.value;pair.append(img,ta);addReocrAction(pair,id,f,i);section.append(pair);api(`/api/jobs/${id}/image/${f}/${i}`).then(r=>r.blob()).then(b=>{if(selected!==id)return;const url=URL.createObjectURL(b);imageUrls.push(url);img.src=url;}).catch(()=>{img.alt='图片加载失败';});}fields.append(section);} }
+let resultPage=0,resultFloors=[],resultRender=0,resultLoad=0;
+const resultPageSize=8;
+async function loadResult(id){
+  const request=++resultLoad,changed=$('#result-content').dataset.job!==id;selected=id;
+  $('#result-footer').hidden=true;$('#result-content').hidden=true;$('#result-empty').hidden=false;
+  $('#result-empty h3').textContent='正在读取识别结果…';
+  const d=await json(`/api/jobs/${id}/result`);if(request!==resultLoad)return;
+  pipelineBusy=['waiting','queued','running'].includes(d.job.organize_state);
+  if(d.job.state!=='succeeded'&&!d.result.length){
+    $('#result-empty h3').textContent='暂无可显示的结果';
+    notice(d.job.error||'任务尚未完成，请稍后查看。',!!d.job.error);return;
+  }
+  resultData=d.result;resultFloors=d.floors||[];if(changed)resultPage=0;
+  $('#organizer').hidden=d.job.state!=='succeeded';
+  if(d.job.state==='succeeded')loadPlan(id).catch(e=>notice(e.message,true));
+  else notice(d.job.error||'当前显示已保存的部分结果，恢复后继续处理。',true);
+  loadRecoveryLog(id).catch(e=>notice(e.message,true));
+  $('#result-empty').hidden=true;$('#result-content').hidden=false;
+  $('#result-footer').hidden=false;$('#result-actions').hidden=false;
+  $('#result-content').dataset.job=id;$('#result-content').dataset.state=d.job.state;
+  $('#result-source').textContent=d.job.source;
+  $('#result-engine').textContent=d.job.engine==='builtin'?('内置 OCR · '+(languageNames[d.job.language]||languageNames.zh)):'LLM 多模态';
+  $('#save-result').disabled=pipelineBusy||d.job.state!=='succeeded';
+  renderResultFields();$('#result-scroll').scrollTop=0;
+}
+function renderResultFields(){
+  const id=selected,version=++resultRender,entries=[];
+  resultData.forEach((floor,f)=>{if(!floor.images.length)entries.push({f,i:null});else floor.images.forEach((_,i)=>entries.push({f,i}));});
+  const pages=Math.max(1,Math.ceil(entries.length/resultPageSize));resultPage=Math.max(0,Math.min(resultPage,pages-1));
+  $('#result-page').textContent=`素材 ${entries.length?resultPage*resultPageSize+1:0}–${Math.min(entries.length,(resultPage+1)*resultPageSize)} / ${entries.length} · ${resultPage+1}/${pages} 页`;
+  $('#result-prev').disabled=resultPage===0;$('#result-next').disabled=resultPage===pages-1;
+  imageUrls.forEach(url=>URL.revokeObjectURL(url));imageUrls=[];
+  const fields=$('#result-fields'),sections=new Map();fields.replaceChildren();
+  for(const {f,i} of entries.slice(resultPage*resultPageSize,(resultPage+1)*resultPageSize)){
+    const floor=resultData[f],floorNumber=resultFloors[f]??f+1;
+    if(!sections.has(f)){
+      const section=node('section',undefined,'result-floor');section.append(node('h3',`楼层 ${floorNumber}`));
+      const text=node('textarea');text.value=floor.text;text.rows=2;text.setAttribute('aria-label',`楼层 ${floorNumber} 正文`);text.oninput=()=>floor.text=text.value;
+      section.append(text);sections.set(f,section);fields.append(section);
+    }
+    if(i===null)continue;
+    const pair=node('div',undefined,'image-pair'),img=node('img'),ta=node('textarea');
+    img.alt=`楼层 ${floorNumber} 的第 ${i+1} 张原图（点击放大）`;img.tabIndex=0;img.setAttribute('role','button');
+    img.onclick=()=>{if(img.src)window.open(img.src,'_blank','noopener');};
+    img.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();img.click();}};
+    ta.value=floor.images[i];ta.setAttribute('aria-label',`图片 ${i+1} 识别文字`);ta.oninput=()=>floor.images[i]=ta.value;
+    pair.append(img,ta);addReocrAction(pair,id,f,i);sections.get(f).append(pair);
+    api(`/api/jobs/${id}/image/${f}/${i}`).then(r=>r.blob()).then(blob=>{
+      if(selected!==id||version!==resultRender||!img.isConnected)return;
+      const url=URL.createObjectURL(blob);imageUrls.push(url);img.src=url;
+    }).catch(()=>{img.alt='图片加载失败';});
+  }
+}
+$('#result-prev').onclick=()=>{resultPage--;renderResultFields();$('#result-scroll').scrollTop=0;};
+$('#result-next').onclick=()=>{resultPage++;renderResultFields();$('#result-scroll').scrollTop=0;};
 $('#save-result').onclick=()=>json(`/api/jobs/${selected}/result`,{method:'PUT',body:JSON.stringify(resultData)}).then(()=>notice('校对结果已保存')).catch(e=>notice(e.message,true));
 function downloadBlob(blob, name){const url=URL.createObjectURL(blob),a=node('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 $('#download-result').onclick=()=>downloadBlob(new Blob([JSON.stringify(resultData,null,2)],{type:'application/json'}),'识别结果.json');

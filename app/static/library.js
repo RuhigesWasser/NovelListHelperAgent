@@ -1,6 +1,6 @@
 'use strict';
 let libraryBooks=[],detailBook=null,detailRequest=0;
-let coverPoll=null;
+let coverPoll=null,libraryPage=0;
 const coverBlobs=new Map(),coverLoads=new Map();
 function coverElement(book,large=false){
   const cover=node('div',undefined,large?'book-mark large-cover':'book-mark');cover.setAttribute('aria-hidden','true');
@@ -47,10 +47,14 @@ function renderLibrary(){
   const books=libraryBooks.filter(b=>(!category||b.category===category)&&(!platform||b.platform===platform)&&(!status||(b.status||'未知')===status)&&(!query||[b.title,b.author,b.tags].join(' ').toLocaleLowerCase().includes(query)));
   const sort=$('#library-sort').value;
   books.sort((a,b)=>sort==='title'?a.title.localeCompare(b.title,'zh-CN'):sort==='words'?wordNumber(b.words)-wordNumber(a.words):(b.saved_on||'').localeCompare(a.saved_on||'')||a.title.localeCompare(b.title,'zh-CN'));
-  $('#library-count').textContent=`显示 ${books.length} / ${libraryBooks.length} 本`;
+  const size=Number($('#library-page-size').value),pages=Math.max(1,Math.ceil(books.length/size));
+  libraryPage=Math.max(0,Math.min(libraryPage,pages-1));
+  $('#library-count').textContent=`共 ${books.length} / ${libraryBooks.length} 本`;
+  $('#library-page').textContent=`${libraryPage+1} / ${pages} 页`;
+  $('#library-prev').disabled=libraryPage===0;$('#library-next').disabled=libraryPage===pages-1;
   const list=$('#books');list.replaceChildren();
   if(!books.length){const empty=node('div',undefined,'library-empty');empty.append(node('h3',libraryBooks.length?'没有匹配的书籍':'书库还是空的'),node('p',libraryBooks.length?'换个关键词，或清除筛选条件。':'从帖子或截图开始整理，也可以手动添加书籍。'));list.append(empty);return;}
-  for(const book of books){
+  for(const book of books.slice(libraryPage*size,(libraryPage+1)*size)){
     const card=node('article',undefined,'book-card');
     const top=node('div',undefined,'book-card-top'),cover=coverElement(book);
     const info=node('div',undefined,'book-card-info'),heading=node('h3'),open=node('button',book.title,'book-title');open.type='button';open.setAttribute('aria-label',`查看《${book.title}》详情`);open.onclick=()=>openBookDetail(book.path);heading.append(open);
@@ -70,9 +74,13 @@ $('#book-create-close').onclick=()=>$('#book-create-dialog').close();
 $('#book-detail-close').onclick=()=>bookDialog.close();
 bookDialog.addEventListener('close',()=>{detailRequest++;detailBook=null;});
 $('#book-reader-close').onclick=()=>$('#book-reader-dialog').close();
-$('#library-query').addEventListener('input',renderLibrary);
-for(const id of ['#library-category','#library-platform','#library-status','#library-sort'])$(id).onchange=renderLibrary;
-$('#library-reset').onclick=()=>{for(const id of ['#library-query','#library-category','#library-platform','#library-status'])$(id).value='';$('#library-sort').value='updated';renderLibrary();};
+function resetLibraryPage(){libraryPage=0;renderLibrary();$('#books').scrollTop=0;}
+$('#library-query').addEventListener('input',resetLibraryPage);
+$('#library-page-size').onchange=resetLibraryPage;
+$('#library-prev').onclick=()=>{libraryPage--;renderLibrary();$('#books').scrollTop=0;};
+$('#library-next').onclick=()=>{libraryPage++;renderLibrary();$('#books').scrollTop=0;};
+for(const id of ['#library-category','#library-platform','#library-status','#library-sort'])$(id).onchange=resetLibraryPage;
+$('#library-reset').onclick=()=>{for(const id of ['#library-query','#library-category','#library-platform','#library-status'])$(id).value='';$('#library-sort').value='updated';resetLibraryPage();};
 
 async function openBookDetail(path){
   const request=++detailRequest;detailBook=null;
