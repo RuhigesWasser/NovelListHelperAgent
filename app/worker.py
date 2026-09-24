@@ -27,7 +27,13 @@ def main():
             images.mkdir(exist_ok=True)
             raw = asyncio.run(fetch_thread(extract_tid(spec['source']), str(images), 'origin', 30, True))
         write_json(folder/'raw.json',raw)
-        engine = ocr.BuiltinOCR(spec.get('language', 'zh')) if spec['engine'] == 'builtin' else ocr.LlmOCR.from_config(spec)
+        try:
+            engine = ocr.BuiltinOCR(spec.get('language', 'zh')) if spec['engine'] == 'builtin' else ocr.LlmOCR.from_config(spec)
+        except Exception as error:
+            if recovery.options['mode']!='vision':raise
+            message=str(error)
+            recovery.record('reocr','running','识别引擎未能启动，尝试已配置的多模态兜底')
+            def engine(path):raise RuntimeError(message)
         failures=recognize_images(raw,engine,folder,recovery)
         if failures:
             (folder/'error.txt').write_text(f'{failures} 张图片识别失败；其余图片已保存，可恢复失败项。',encoding='utf8')

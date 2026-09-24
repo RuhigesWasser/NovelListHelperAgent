@@ -62,7 +62,7 @@ class Task(BaseModel):
     engine: str = 'builtin'
     image: str = Field(default='', max_length=28_000_000)
     language: str = 'zh'
-    auto_mode: Literal['off','local','llm'] = 'local'
+    auto_mode: Literal['off','local','llm','vision'] = 'local'
 
 
 class BookUpdate(BaseModel):
@@ -88,12 +88,12 @@ class ESJLogin(BaseModel):
 
 
 class Extraction(BaseModel):
-    method: Literal['local', 'llm'] = 'local'
+    method: Literal['local', 'llm', 'vision'] = 'local'
 
 
 class RecoverySettings(BaseModel):
     mode: Literal['off','text','vision'] = 'off'
-    max_calls: int = Field(default=3,ge=1,le=10)
+    max_calls: int = Field(default=3,ge=1,le=1000)
     max_tokens: int = Field(default=32768,ge=256,le=262144)
 
 
@@ -415,7 +415,7 @@ def create_app(local, token, shutdown=lambda: None):
                 extract_tid(value.source)
             except ValueError:
                 raise HTTPException(400, '请输入贴吧帖子链接或数字 ID') from None
-        current = llm_config(value.engine)
+        current = llm_config('llm' if value.auto_mode=='vision' else value.engine)
         if value.auto_mode == 'llm':
             try:
                 LlmOCR.from_config(current)
@@ -428,6 +428,7 @@ def create_app(local, token, shutdown=lambda: None):
     def start_organize(job_id: str, value: Extraction):
         config = model_config()
         try:
+            if value.method=='vision':config=llm_config('llm')
             if value.method == 'llm':
                 LlmOCR.from_config(config)
             return jobs.queue_pipeline(job_id,value.method,config)
@@ -531,19 +532,40 @@ def create_app(local, token, shutdown=lambda: None):
                 raise HTTPException(400, str(exc)) from None
         else:
             raw=json.loads((path.parent/'raw.json').read_text(encoding='utf8'))
-            plan = organize.extract(data['result'], data['floors'],raw.get('title',''))
+            progress=path.parent/'ocr-progress.json'
+            layouts=json.loads(progress.read_text(encoding='utf8')).get('images',{}) if progress.exists() else {}
+            layouts={key:entry for key,entry in layouts.items() if entry.get('text')==data['result'][int(key.split(':')[0])]['images'][int(key.split(':')[1])]}
+            plan = organize.extract(data['result'], data['floors'],raw.get('title',''),layouts)
+        plan=enrich_plan(job_id,plan,method,config)
         with book_lock:
+            previous=read_plan(job_id)
+            preserved=[item for item in previous['items'] if item['state'] in ('archived','confirmed','verified') or item.get('user_edited')]
+            for item in preserved:
+                plan['items']=[fresh for fresh in plan['items'] if not (fresh['floor_index']==item['floor_index'] and fresh['image_index']==item['image_index'] and providers.normalize(fresh['title'])==providers.normalize(item['title']))]
+            plan['items']=preserved+plan['items']
             write_plan(path, plan)
         return read_plan(job_id)
+
+    def enrich_plan(job_id,plan,method,config):
+        if method!='vision' and config.get('recovery',{}).get('mode') not in ('vision','text'):return plan
+        from app import image_books
+        folder=local/'jobs'/job_id
+        data=result(job_id);raw=json.loads((folder/'raw.json').read_text(encoding='utf8'))
+        if method=='vision':
+            config=llm_config('llm');client=LlmOCR.from_config(config)
+        else:client=None
+        recovery=recovery_tools.Recovery(folder,config,lambda:jobs.check_pipeline(job_id) if active_pipeline.get()==job_id else None)
+        return image_books.augment(plan,data['result'],data['floors'],raw,folder,recovery,client)
 
     @app.post('/api/jobs/{job_id}/books/{item_id}/verify')
     def verify_book(job_id: str, item_id: int, value: ProposalChoice):
         path = plan_path(job_id)
-        edit_proposal(job_id, item_id, Proposal(**value.model_dump()))
+        edited=edit_proposal(job_id, item_id, Proposal(**value.model_dump()))
         data = result(job_id)
         if value.floor_index >= len(data['floors']) or value.image_index >= data['images'][value.floor_index]:
             raise HTTPException(400, '请选择有效图片来源')
         item = value.model_dump(exclude={'url'})
+        item.update({key:edited[key] for key in ('user_edited','extraction','alternative_titles') if key in edited})
         item['floor'] = data['floors'][value.floor_index]
         try:
             if value.url:
@@ -580,6 +602,10 @@ def create_app(local, token, shutdown=lambda: None):
             plan = read_plan(job_id)
             if item_id < 0 or item_id > len(plan['items']):
                 raise HTTPException(400, '书籍序号无效')
+            previous=plan['items'][item_id] if item_id<len(plan['items']) else {}
+            item['user_edited']=bool(previous.get('user_edited') or not previous or any(previous.get(key)!=item.get(key) for key in ('title','author','platform','category')))
+            if previous.get('extraction'):item['extraction']=previous['extraction']
+            if previous.get('alternative_titles') and all(previous.get(key)==item.get(key) for key in ('title','author','platform')):item['alternative_titles']=previous['alternative_titles']
             if item_id == len(plan['items']):
                 plan['items'].append(item)
             else:
@@ -629,6 +655,9 @@ def create_app(local, token, shutdown=lambda: None):
             plan = read_plan(job_id)
             if not plan['items']:
                 plan = extract_plan(job_id,method,config)
+            else:
+                plan=enrich_plan(job_id,plan,method,config)
+                with book_lock:write_plan(plan_path(job_id),plan)
             recovery=recovery_tools.Recovery(local/'jobs'/job_id,config,lambda:jobs.check_pipeline(job_id))
             ocr_result=result(job_id)['result']
             raw=json.loads((local/'jobs'/job_id/'raw.json').read_text(encoding='utf8'))

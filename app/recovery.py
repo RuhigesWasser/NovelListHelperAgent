@@ -137,7 +137,9 @@ class Recovery:
                 if not isinstance(title,str) or not 0<len(title)<=100 or not isinstance(author,str) or len(author)>200 or platform not in (*providers.PLATFORMS,'all'):raise ValueError()
                 # A newly supplied author must be present in the original material.
                 if author!=item.get('author','') and providers.normalize(author) not in providers.normalize(ocr_text):raise ValueError()
-                if item.get('platform')!='all' and platform!=item['platform']:raise ValueError()
+                if item.get('platform')!='all' and platform not in (item['platform'],'all'):
+                    markers={'sfacg':('菠萝包','SF轻小说'),'fanqie':('番茄',),'qidian':('起点',),'ciweimao':('刺猬猫',),'esj':('esjzone','ESJ')}
+                    if not any(marker.casefold() in ocr_text.casefold() for marker in markers[platform]):raise ValueError()
                 from difflib import SequenceMatcher
                 if SequenceMatcher(None,providers.normalize(item['title']),providers.normalize(title)).ratio()<.6:raise ValueError()
             except (ValueError,KeyError,TypeError,AttributeError):
@@ -171,9 +173,16 @@ def recognize_images(raw,engine,folder,recovery):
             digest=''
             try:
                 digest=hashlib.sha256(filename.read_bytes()).hexdigest()
-                text=by_hash[digest] if digest in by_hash else engine(filename)
+                cached=digest in by_hash
+                prior=next((entry for entry in saved['images'].values() if entry.get('hash')==digest and isinstance(entry.get('layout'),list)),{})
+                text=by_hash[digest] if cached else engine(filename)
+                if not text.strip() and recovery.options['mode']=='vision':
+                    improved=recovery.read_image(filename)
+                    if improved is not None:text=improved
                 by_hash[digest]=text
                 saved['images'][key]={'hash':digest,'state':'succeeded','text':text}
+                layout=prior.get('layout') if cached else getattr(engine,'last_layout',None)
+                if isinstance(layout,list):saved['images'][key]['layout']=layout
             except Exception as error:
                 text=None
                 if filename.exists():

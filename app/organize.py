@@ -8,7 +8,8 @@ GENRES = ('校园', '科幻', '魔幻', '都市', '玄幻', '古风', '游戏', 
 
 
 def clean_header(lines):
-    return [s for s in lines if s and re.search(r'[\u3400-\u9fff]', s)
+    return [s for s in lines if s and any(c.isalpha() for c in s)
+            and s not in ('VIP','返回','首页','详情','作品详情','SF轻小说','菠萝包','起点读书','刺猬猫','番茄小说')
             and not re.search(r'美团|小红书|下拉刷新|书圈|书架|KB/|签约|日更', s, re.I)]
 
 
@@ -32,8 +33,8 @@ def join_title(lines):
 def image_hint(text):
     lines = [s.strip() for s in text.splitlines() if s.strip()]
     platform, title, author, category = '', '', '', '待分类'
-    compact=next(((i,m) for i,s in enumerate(lines[:12]) if (m:=re.fullmatch(r'(?:连载中|连载|已完结|完结)[|丨｜1Il\s]+([^|丨｜]+?)[|丨｜\s]+[\d.]+万?字',s))),None)
-    if compact and any(s=='VIP' for s in lines[:compact[0]]):
+    compact=next(((i,m) for i,s in enumerate(lines[:12]) if (m:=re.fullmatch(r'(?:连载中|连载|已完结|完结)[|丨｜1Il\s]+([^|丨｜\d]+?)[|丨｜1Il\s]*[\d.]+万?字',s))),None)
+    if compact and compact[0]>0:
         end,match=compact
         platform='sfacg';category=match[1].strip()
         title=join_title(clean_header([s for s in lines[:end] if s!='VIP']))
@@ -92,7 +93,22 @@ def image_hint(text):
 
 
 def image_hints(text,context=''):
+    text=text.replace('\r','\n')
     lines=[s.strip() for s in text.splitlines() if s.strip()]
+    # Explicit field labels work across platforms, languages and page templates.
+    labelled=[];current=None
+    aliases={'菠萝包':'sfacg','SF轻小说':'sfacg','刺猬猫':'ciweimao','起点':'qidian','番茄':'fanqie','ESJ':'esj'}
+    platform=next((value for name,value in aliases.items() if name.casefold() in text.casefold()),'all')
+    for index,line in enumerate(lines):
+        title=re.fullmatch(r'(?:书名|書名|作品名|小说名称|小說名稱|Title)\s*[:：]\s*(.*)',line,re.I)
+        author=re.fullmatch(r'(?:作者|著者|Author)\s*[:：]\s*(.*)',line,re.I)
+        if title:
+            name=title[1].strip() or (lines[index+1] if index+1<len(lines) and not re.search(r'[:：]',lines[index+1]) else '')
+            if name:
+                current={'title':name[:100],'author':'','platform':platform,'category':'待分类'};labelled.append(current)
+        elif author and current:
+            current['author']=(author[1].strip() or (lines[index+1] if index+1<len(lines) and not re.search(r'[:：]',lines[index+1]) else ''))[:200]
+    if labelled:return labelled
     shelf=[];last_author=-1
     if '书架' in text:
         for index,line in enumerate(lines):
@@ -109,15 +125,47 @@ def image_hints(text,context=''):
                 if len(line)<4 or '/' in line or re.match(r'更新|上次|未读|已读|更多|目录|作品简介',line):continue
                 if line in {item['title'] for item in shelf} or not re.search(r'[\u3400-\u9fff]',line):continue
                 shelf.append({'title':line[:100],'author':'','platform':shelf[0]['platform'],'category':'待分类'})
-    return shelf or [image_hint(text)]
+    if shelf:return shelf
+    hint=image_hint(text)
+    if hint['title']:return [hint]
+    # Repeated title/author rows need no site-specific toolbar or vote counters.
+    rows=[]
+    for index,line in enumerate(lines):
+        author=re.fullmatch(r'(?:作者|著者|Author)\s*[:：]\s*(.+)',line,re.I)
+        if author and index:
+            title=lines[index-1].strip('《》')
+            if not re.search(r'简介|目录|书架|首页|返回|登录|注册',title) and not re.search(r'[:：]',title):
+                rows.append({'title':title[:100],'author':author[1][:200],'platform':platform,'category':'待分类'})
+    return rows or [hint]
 
 
-def extract(result, floors,context=''):
+def layout_hints(layout,context=''):
+    """Pair explicit author rows with the closest title in the same column."""
+    hints=[]
+    for row in layout:
+        author=re.fullmatch(r'(?:作者|著者|Author)\s*[:：]\s*(.+)',row['text'].strip(),re.I)
+        if not author:continue
+        x=min(p[0] for p in row['box']);right=max(p[0] for p in row['box']);top=min(p[1] for p in row['box'])
+        height=max(p[1] for p in row['box'])-top
+        candidates=[]
+        for other in layout:
+            bottom=max(p[1] for p in other['box']);left=min(p[0] for p in other['box'])
+            if 0<=top-bottom<=max(100,4*height) and abs(left-x)<=max(35,height*2) and left<right:
+                title=other['text'].strip()
+                if clean_header([title]) and not re.search(r'[:：]|作者|著者|Author|\d.*字',title,re.I):candidates.append((bottom,title))
+        if candidates:
+            title=max(candidates)[1].strip('《》')
+            hints.append({'title':title[:100],'author':author[1][:200],'platform':'all','category':'待分类'})
+    return hints if len(hints)>1 else []
+
+
+def extract(result, floors,context='',layouts=None):
     items, skipped, seen = [], [], set()
     for f, floor in enumerate(result):
         for i, text in enumerate(floor['images']):
             source = {'floor_index': f, 'floor': floors[f], 'image_index': i}
-            for hint in image_hints(text,context):
+            spatial=layout_hints((layouts or {}).get(f'{f}:{i}',{}).get('layout',[]),context)
+            for hint in spatial or image_hints(text,context):
                 if not hint['title']:
                     skipped.append({**source, 'reason': '未识别到文字，可能是插图；可查看原图或重新识别' if not text.strip() else '未提取到书籍标题，请校对文字或使用 LLM 提取'})
                     continue
@@ -154,19 +202,23 @@ def parse_llm(response,result,floors):
     try:
         values = json.loads(response)
         if not isinstance(values,list):raise ValueError()
-        items = []
+        items = [];seen=set()
         for value in values:
             f, i = value['floor_index'], value['image_index']
             if type(f) is not int or type(i) is not int or f < 0 or i < 0:
                 raise ValueError()
             result[f]['images'][i]
-            title = str(value['title']).strip()
+            if not isinstance(value.get('title'),str) or not isinstance(value.get('author',''),str):raise ValueError()
+            title = value['title'].strip()
             if not title:
                 continue
+            identity=(f,i,providers.normalize(title),providers.normalize(value.get('author','')))
+            if identity in seen:continue
+            seen.add(identity)
             items.append({'floor_index': f, 'floor': floors[f], 'image_index': i,
                           'title': title[:100], 'author': str(value.get('author', ''))[:200],
                           'platform': value.get('platform') if value.get('platform') in providers.PLATFORMS else 'all',
-                          'category': str(value.get('category') or '待分类')[:50],
+                          'category': re.split(r'[,，、|/]',str(value.get('category') or '待分类'))[0].strip()[:50] or '待分类',
                           'state': 'draft', 'candidates': [], 'warnings': []})
     except (ValueError, TypeError, KeyError, IndexError):
         raise ValueError('模型未返回有效书单，请重试或使用本地提取') from None
@@ -178,6 +230,28 @@ def parse_llm(response,result,floors):
 
 
 def verify(item):
+    result=verify_query(item)
+    alternatives=[title for title in item.get('alternative_titles',[]) if title!=item['title']][:3]
+    checked=[result]
+    for title in alternatives:
+        checked.append(verify_query({**item,'title':title}))
+    verified={entry['book']['url']:entry for entry in checked if entry['state']=='verified'}
+    if len(verified)==1:return next(iter(verified.values()))
+    if len(verified)>1:
+        return {**result,'state':'review','book':None,'reason':'截图标题有分歧，多个作品均能匹配，请核对原图。'}
+    if item['platform']!='all':
+        verified={}
+        for title in [item['title'],*alternatives]:
+            try:cross=verify_query({**item,'title':title,'platform':'all'})
+            except providers.ProviderError as error:
+                result.setdefault('warnings',[]).append('跨平台查询失败：'+str(error));continue
+            if cross['state']=='verified':verified[cross['book']['url']]=cross
+        if len(verified)==1:return next(iter(verified.values()))
+        if len(verified)>1:return {**result,'state':'review','book':None,'reason':'跨平台存在多个匹配作品，请核对原图。'}
+    return result
+
+
+def verify_query(item):
     response = providers.search(item['platform'], item['title'], item['author'])
     candidates = response['items']
     exact = [c for c in candidates if c['match'] == 'exact']

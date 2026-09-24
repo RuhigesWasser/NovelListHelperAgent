@@ -18,7 +18,7 @@ for(const id of ['#upload','#upload-folder'])$(id).addEventListener('change',()=
   $('#upload-name').textContent=uploadFiles.length?`已选 ${uploadFiles.length} 张图片`:'选择小说截图（可多选）';
   $(id==='#upload'?'#upload-folder':'#upload').value='';
 });
-$('#engine').addEventListener('change',()=>$('#engine-help').textContent=$('#engine').value==='builtin'?'在本机 CPU 上运行，图片不会发送给模型服务。':'图片将发送到你配置的 API 服务，可能产生调用费用。');
+$('#engine').addEventListener('change',()=>$('#engine-help').textContent=$('#engine').value==='builtin'?'OCR 在本机运行；启用 LLM 提取或多模态兜底时，会按设置发送文字或图片。':'图片将发送到你配置的 API 服务，可能产生调用费用。');
 function asBase64(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(file);});}
 let failedBatch=[];
 async function submitBatch(items){
@@ -67,7 +67,7 @@ async function loadJobs(){
     }else{
       const retry=node('button','重新识别','quiet');retry.onclick=()=>post(`/api/jobs/${j.id}/retry`).then(()=>{notice('已创建重试任务');loadJobs();}).catch(err=>notice(err.message,true));actions.append(retry);
       if(j.state==='succeeded'){
-        const organize=node('button','继续自动整理','quiet');organize.onclick=()=>post(`/api/jobs/${j.id}/organize`,{method:j.auto_mode==='llm'?'llm':'local'}).then(loadJobs).catch(err=>notice(err.message,true));actions.append(organize);
+        const organize=node('button','继续自动整理','quiet');organize.onclick=()=>post(`/api/jobs/${j.id}/organize`,{method:['llm','vision'].includes(j.auto_mode)?j.auto_mode:'local'}).then(loadJobs).catch(err=>notice(err.message,true));actions.append(organize);
       }
     }
     const recover=node('button','恢复失败项','quiet');recover.onclick=()=>post(`/api/jobs/${j.id}/recover`).then(()=>{notice('恢复任务已加入队列');loadJobs();}).catch(e=>notice(e.message,true));if(!busy(j)&&(['failed','cancelled','interrupted'].includes(j.state)||['failed','review','interrupted','cancelled'].includes(j.organize_state)))actions.append(recover);row.append(actions);if(j.error||j.organize_error)row.append(node('p',j.error||j.organize_error,'help'));list.append(row);

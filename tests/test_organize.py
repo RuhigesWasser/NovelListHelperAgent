@@ -7,7 +7,7 @@ import test_app
 
 class ExtractionTests(unittest.TestCase):
     def test_compact_sfacg_header_without_vote_counters(self):
-        for metadata in ('连载中|校园|16万字','连载中1校园|16万字','连载中｜校园｜16万字'):
+        for metadata in ('连载中|校园|16万字','连载中1校园|16万字','连载中｜校园｜16万字','连载中|校园116万字','连载中|校园16万字'):
             hint=organize.image_hint('测试小说的\n第二行\nVIP\n'+metadata+'\nEnglishAuthor\n这是简介，不是书名')
             self.assertEqual((hint['title'],hint['author'],hint['platform'],hint['category']),('测试小说的第二行','EnglishAuthor','sfacg','校园'))
         plan=organize.extract([{'text':'','images':['']}],[1])

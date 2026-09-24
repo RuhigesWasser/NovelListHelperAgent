@@ -59,7 +59,7 @@ async function verifyItem(index){
   catch(error){item.error=error.message;throw error;}
 }
 $('#extract-books').onclick=()=>planAction(async()=>{
-  if(plan.items.length&&!confirm('重新提取会替换此任务的待整理书单，已归档文件保留。继续？'))return;
+  if(plan.items.length&&!confirm('重新提取将更新待整理书单，已确认和已归档条目保留。继续？'))return;
   await json(`/api/jobs/${planJob}/result`,{method:'PUT',body:JSON.stringify(resultData)});
   $('#organize-status').textContent='正在提取…';
   plan=await post(`/api/jobs/${planJob}/books/extract`,{method:$('#extract-method').value});

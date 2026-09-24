@@ -14,7 +14,7 @@ async function loadRecoveryLog(id){
   const items=Object.entries(data.ocr.images),failed=items.filter(([,i])=>i.state==='failed');
   target.append(node('p',`已保存图片 ${items.length-failed.length}/${data.total_images} · 恢复模型调用 ${data.recovery.calls} 次`,'help'));
   for(const [key,item]of failed){const [f,i]=key.split(':').map(Number);target.append(node('p',`楼层 ${data.floors[f]??f+1} · 图片 ${i+1}：${item.error}`,'help'));}
-  const actions={search:'重新查询',reocr:'重新识图',repair_json:'修复书单格式',retry_lookup:'重试查询'};
+  const actions={image_books:'布局识别',search:'重新查询',reocr:'重新识图',repair_json:'修复书单格式',retry_lookup:'重试查询'};
   for(const event of data.recovery.events)target.append(node('p',`${actions[event.action]||event.action}：${event.message}`,'help'));
 }
 loadRecoverySettings().catch(e=>notice(e.message,true));

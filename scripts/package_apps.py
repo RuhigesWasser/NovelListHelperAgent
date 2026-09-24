@@ -6,7 +6,7 @@ import zipfile
 
 ROOT=Path(__file__).resolve().parents[1]
 EDITION_NAMES=('agent','browser','windows')
-CORE=('__init__','paths','agent_tools','providers','organize','chapters','library','esj_session','esj_settings','esj_catalog','fanqie_text','ocr_models','llm_settings','mainland','covers')
+CORE=('__init__','paths','agent_tools','providers','organize','chapters','library','esj_session','esj_settings','esj_catalog','fanqie_text','ocr_models','llm_settings','mainland','covers','image_books','recovery')
 SUFFIXES={'.py','.js','.css','.html','.json','.md','.txt','.cs','.csproj','.ps1','.sh','.cmd','.command','.toml','.lock'}
 
 
