@@ -105,6 +105,7 @@ let resultPage=0,resultFloors=[],resultRender=0,resultLoad=0;
 const resultPageSize=8;
 async function loadResult(id){
   const request=++resultLoad,changed=$('#result-content').dataset.job!==id;selected=id;
+  $('#organizer').hidden=true;
   $('#result-footer').hidden=true;$('#result-content').hidden=true;$('#result-empty').hidden=false;
   $('#result-empty h3').textContent='正在读取识别结果…';
   const d=await json(`/api/jobs/${id}/result`);if(request!==resultLoad)return;
@@ -114,7 +115,6 @@ async function loadResult(id){
     notice(d.job.error||'任务尚未完成，请稍后查看。',!!d.job.error);return;
   }
   resultData=d.result;resultFloors=d.floors||[];if(changed)resultPage=0;
-  $('#organizer').hidden=d.job.state!=='succeeded';
   if(d.job.state==='succeeded')loadPlan(id).catch(e=>notice(e.message,true));
   else notice(d.job.error||'当前显示已保存的部分结果，恢复后继续处理。',true);
   loadRecoveryLog(id).catch(e=>notice(e.message,true));

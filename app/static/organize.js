@@ -1,5 +1,6 @@
 'use strict';
 let plan={items:[],skipped:[]},planJob=null,organizing=false;
+let planRequest=0;
 const planStates={draft:'待核对',review:'待选择',verified:'书名与作者一致',confirmed:'已选择',archived:'已归档'};
 function sourceLink(item){
   if(!item.source_url)return node('span','来源：本地图片','help');
@@ -7,9 +8,11 @@ function sourceLink(item){
 }
 async function loadPlan(id){
   if(organizing)return;
+  const request=++planRequest;
   const response=await json(`/api/jobs/${id}/books`);
-  if(selected!==id)return;
-  plan=response;planJob=id;renderPlan();
+  if(selected!==id||request!==planRequest||organizing)return;
+  if(planJob===id&&plan.items.some(item=>item.dirty)){$('#organizer').hidden=false;return;}
+  plan=response;planJob=id;renderPlan();$('#organizer').hidden=false;
 }
 function draftValue(item){return Object.fromEntries(['title','author','platform','category','floor_index','image_index'].map(k=>[k,item[k]]));}
 function renderPlan(){
@@ -52,10 +55,10 @@ function renderPlan(){
   target.closest('#organizer').querySelectorAll('button,input,select').forEach(n=>n.disabled=pipelineBusy||organizing);
 }
 async function planAction(action){
-  if(organizing||!planJob)return;organizing=true;
+  if(organizing||!planJob||selected!==planJob)return;organizing=true;++planRequest;
   $('#organizer').querySelectorAll('button,input,select').forEach(n=>n.disabled=true);
   try{await action();}catch(error){notice(error.message,true);}
-  finally{organizing=false;$('#organizer').querySelectorAll('button,input,select').forEach(n=>n.disabled=false);if(selected===planJob)renderPlan();else await loadPlan(selected);}
+  finally{organizing=false;$('#organizer').querySelectorAll('button,input,select').forEach(n=>n.disabled=false);if(selected===planJob){renderPlan();$('#organizer').hidden=false;}else await loadPlan(selected);}
 }
 async function verifyItem(index){
   const item=plan.items[index];

@@ -84,8 +84,17 @@ class PlanTests(unittest.TestCase):
         with patch('app.providers.search',return_value={'items':[providers.match(book,'书名','作者')]}),patch('app.providers.detail',return_value=book):
             result=self.post(path+'/0/verify',item)
         self.assertEqual(result.json()['state'],'verified')
+        job_id=path.split('/')[3]
+        self.app.state.jobs.pipeline_status(job_id,'review','待核对 1 本')
+        plan_file=self.local/'jobs'/job_id/'books.json'
+        pending_plan=json.loads(plan_file.read_text(encoding='utf8'))
+        pending_plan['review_notice']='仍需手动核对'
+        plan_file.write_text(json.dumps(pending_plan),encoding='utf8')
         archived=self.post(path+'/archive',{}).json()['items'][0]
         self.assertEqual(archived['state'],'archived')
+        self.assertEqual(self.app.state.jobs.get(job_id)['organize_state'],'succeeded')
+        self.assertIn('归档 1 本',self.app.state.jobs.get(job_id)['organize_stage'])
+        self.assertNotIn('review_notice',self.client.get(path,headers=self.headers).json())
         file=self.local/'library'/archived['path']
         before=file.read_bytes()
         self.assertIn('楼层 17',before.decode())

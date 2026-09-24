@@ -685,6 +685,14 @@ def create_app(local, token, shutdown=lambda: None):
                     item.pop('reason', None)
                 except (HTTPException,LibraryError) as exc:
                     item['archive_error'] = str(exc.detail)
+            if active_pipeline.get() != job_id:
+                count = sum(item['state'] == 'archived' for item in plan['items'])
+                pending = len(plan['items']) - count
+                skipped = len(plan.get('skipped', []))
+                if not pending and not skipped:
+                    plan.pop('review_notice', None)
+                jobs.pipeline_status(job_id, 'review' if pending or skipped else 'succeeded',
+                    f'归档 {count} 本，待处理 {pending} 本，未提取图片 {skipped} 张')
             write_plan(path, plan)
         return read_plan(job_id)
 
